@@ -1,0 +1,73 @@
+name: Changeset Check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  changeset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine whether a changeset is required
+        id: requirement
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          mapfile -t changed_files < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          if [ "${#changed_files[@]}" -eq 0 ]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          require_changeset=false
+
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              .changeset/*)
+                ;;
+              .github/*)
+                ;;
+              docs/*)
+                ;;
+              site/*)
+                ;;
+              README.md|CHANGELOG.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CODE_OF_CONDUCT.md|NOTICE|LICENSE)
+                ;;
+              *)
+                require_changeset=true
+                break
+                ;;
+            esac
+          done
+
+          echo "required=$require_changeset" >> "$GITHUB_OUTPUT"
+
+      - name: Fail when behavior-changing PR has no changeset
+        if: steps.requirement.outputs.required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -q '^\.changeset/.*\.md$'; then
+            echo "Changeset found."
+            exit 0
+          fi
+
+          echo "This pull request changes runtime, CLI, installer, API, or release behavior but does not include a .changeset entry." >&2
+          echo "Run 'pnpm changeset' and commit the generated file, or keep the PR docs/meta-only." >&2
+          exit 1

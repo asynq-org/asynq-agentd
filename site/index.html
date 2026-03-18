@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>asynq-agentd</title>
+    <meta
+      name="description"
+      content="Open-source local daemon and CLI for running Claude Code, Codex, and future agents behind Asynq Buddy."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Open-source daemon runtime</p>
+        <h1>asynq-agentd</h1>
+        <p class="lede">
+          Local daemon and CLI for running and observing coding agents on your own machine.
+          Built to power Asynq Buddy, but useful on its own today.
+        </p>
+        <div class="actions">
+          <a href="https://github.com/asynq-org/asynq-agentd" class="button button-primary">View on GitHub</a>
+          <a href="https://github.com/asynq-org/asynq-agentd#readme" class="button">Read the docs</a>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>What it already does</h2>
+        <ul class="feature-list">
+          <li>Runs Claude Code and Codex through a local daemon</li>
+          <li>Queues tasks, approvals, recurring jobs, and recent-work continuation</li>
+          <li>Exposes REST, SSE, WebSocket, and terminal-oriented control surfaces</li>
+          <li>Ships with a local operator CLI and bootstrap installers</li>
+        </ul>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h3>CLI-first today</h3>
+          <p>
+            The open-source repo focuses on the daemon and operator CLI. The full Buddy web and mobile UI live in a separate product repo.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Local-first architecture</h3>
+          <p>
+            Pair a machine you control, keep runtime state local, and use Tailscale or your own network path to reach it remotely.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Beta by design</h3>
+          <p>
+            The runtime is already useful, but some adapters, packaging, and onboarding flows are still being hardened in public.
+          </p>
+        </article>
+      </section>
+
+      <section class="panel code-panel">
+        <h2>Install</h2>
+        <pre><code>curl -fsSL https://agentd.asynq.org/install.sh | sh</code></pre>
+        <pre><code>irm https://agentd.asynq.org/install.ps1 | iex</code></pre>
+        <p class="muted">
+          Today the hosted entrypoints are thin wrappers: they clone the repo into a temporary directory and run the real bootstrap installer from source.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>Open-source scope</h2>
+        <p>
+          `asynq-agentd` is the daemon. Asynq Buddy is the user-facing product built on top of it.
+          That split lets the runtime stay open while the higher-level app evolves separately.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

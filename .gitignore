@@ -1,0 +1,7 @@
+.DS_Store
+node_modules
+.asynq-agentd/
+.claude/
+.env
+.env.*
+*.log
