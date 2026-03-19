@@ -7,6 +7,10 @@ import { AsynqAgentdStorage } from "../db/storage.ts";
 import { TaskService } from "./task-service.ts";
 import { RecentWorkService } from "./recent-work-service.ts";
 
+function encodeClaudeProjectPath(projectPath: string): string {
+  return projectPath.replace(/[\\/]/g, "-");
+}
+
 test("recent work scan indexes claude-like files and continue creates a task", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
@@ -52,7 +56,7 @@ test("recent work scan parses real Claude session metadata and transcripts", () 
   mkdirSync(projectRoot, { recursive: true });
 
   // Encode project path like Claude does: /foo/bar -> -foo-bar
-  const encodedProjectPath = projectRoot.replace(/\//g, "-");
+  const encodedProjectPath = encodeClaudeProjectPath(projectRoot);
   const sessionsDir = resolve(claudeRoot, "sessions");
   const projectsDir = resolve(claudeRoot, "projects", encodedProjectPath);
   mkdirSync(sessionsDir, { recursive: true });
@@ -246,7 +250,7 @@ test("Claude transcript with last-prompt marker is detected as ended", () => {
   const projectRoot = resolve(root, "project");
   mkdirSync(projectRoot, { recursive: true });
 
-  const encodedProjectPath = projectRoot.replace(/\//g, "-");
+  const encodedProjectPath = encodeClaudeProjectPath(projectRoot);
   const projectsDir = resolve(claudeRoot, "projects", encodedProjectPath);
   mkdirSync(projectsDir, { recursive: true });
 

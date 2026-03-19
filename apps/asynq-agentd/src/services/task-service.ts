@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { createId } from "../utils/id.ts";
 import { nowIso } from "../utils/time.ts";
 import { TASK_PRIORITIES, TASK_STATUSES, type ProjectConfigRecord, type TaskRecord } from "../domain.ts";
@@ -94,7 +95,7 @@ export class TaskService {
       throw new Error("Task description is required");
     }
 
-    if (!input.project_path?.startsWith("/")) {
+    if (!input.project_path || !isAbsolute(input.project_path)) {
       throw new Error("Task project_path must be an absolute path");
     }
 
@@ -108,7 +109,7 @@ export class TaskService {
   }
 
   private validateUpdatePatch(current: TaskRecord, patch: Partial<Omit<TaskRecord, "id" | "created_at">>): void {
-    if (patch.project_path && !patch.project_path.startsWith("/")) {
+    if (patch.project_path && !isAbsolute(patch.project_path)) {
       throw new Error("Task project_path must be an absolute path");
     }
 

@@ -425,9 +425,15 @@ export class RecentWorkService {
   }
 
   private decodeClaudeProjectPath(dirPath: string): string | undefined {
-    // Claude encodes project paths as directory names: /foo/bar -> -foo-bar
+    // Claude encodes project paths as directory names. On POSIX it commonly
+    // looks like /foo/bar -> -foo-bar, and in our cross-platform fixtures we
+    // also allow C:\foo\bar -> C:-foo-bar.
     const dirName = basename(dirPath);
     if (!dirName.startsWith("-")) {
+      if (/^[A-Za-z]:-/.test(dirName)) {
+        return dirName.replace(/-/g, "/");
+      }
+
       return undefined;
     }
 
