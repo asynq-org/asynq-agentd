@@ -258,6 +258,18 @@ h1 {
   font-weight: 700;
 }
 
+.site-footer {
+  padding: 28px 4px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
+.site-footer a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+}
+
 @media (max-width: 860px) {
   .page {
     width: min(100vw - 24px, 1120px);

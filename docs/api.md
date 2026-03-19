@@ -307,16 +307,3 @@ Supported client-to-server messages:
 ```
 
 The terminal channel is intentionally operator-focused. It is not yet a full terminal-emulator contract.
-
-## Future UI contract
-
-If you are building a dashboard or mobile companion, the recommended contract today is:
-
-1. `GET /dashboard/overview`
-2. `GET /dashboard/attention-required`
-3. `GET /dashboard/continue-working`
-4. `GET /recent-work`
-5. `GET /activity?recent_work=<id>` or `GET /activity?session=<id>`
-6. `GET /ws/sessions/:id/events` and `GET /ws/sessions/:id/terminal` where richer live control is needed
-
-That is the intended foundation for the future Buddy product surfaces as well.
