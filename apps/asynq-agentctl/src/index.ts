@@ -30,6 +30,10 @@ function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+function printText(value: string): void {
+  process.stdout.write(`${value}\n`);
+}
+
 function base64UrlEncode(value: string): string {
   return Buffer.from(value, "utf8").toString("base64url");
 }
@@ -212,6 +216,83 @@ async function printDashboard(): Promise<void> {
   print(overview);
 }
 
+async function printApprovals(args: string[]): Promise<void> {
+  const status = getFlag(args, "--status") ?? "pending";
+  print(await request(`/approvals?status=${encodeURIComponent(status)}`));
+}
+
+async function resolveApproval(args: string[], decision: "approved" | "rejected"): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    throw new Error(`Usage: ${decision === "approved" ? "approve" : "reject"} <approval_id> [--note <text>]`);
+  }
+
+  print(await request(`/approvals/${encodeURIComponent(id)}`, {
+    method: "POST",
+    body: JSON.stringify({
+      decision,
+      note: getFlag(args, "--note"),
+    }),
+  }));
+}
+
+async function printRecentWork(args: string[]): Promise<void> {
+  const includePreview = args.includes("--preview");
+  const limit = getFlag(args, "--preview-limit");
+  const previewTypes = getFlag(args, "--preview-types");
+  const compact = !args.includes("--raw-preview");
+  const params = new URLSearchParams();
+
+  if (includePreview) {
+    params.set("include_activity_preview", "true");
+    if (limit) {
+      params.set("activity_preview_limit", limit);
+    }
+    if (previewTypes) {
+      params.set("preview_types", previewTypes);
+    }
+    if (!compact) {
+      params.set("compact", "false");
+    }
+  }
+
+  const query = params.toString();
+  print(await request(`/recent-work${query ? `?${query}` : ""}`));
+}
+
+async function continueRecentWork(args: string[]): Promise<void> {
+  const id = args[0];
+  if (!id) {
+    throw new Error("Usage: continue <recent_work_id> [--instruction <text>]");
+  }
+
+  print(await request(`/recent-work/${encodeURIComponent(id)}/continue`, {
+    method: "POST",
+    body: JSON.stringify({
+      instruction: getFlag(args, "--instruction"),
+    }),
+  }));
+}
+
+function printToken(args: string[]): void {
+  const token = resolveToken();
+  if (!token) {
+    throw new Error("No auth token found. Start the daemon first so it can create auth.json.");
+  }
+
+  if (args.includes("--shell")) {
+    printText(`export ASYNQ_AGENTD_TOKEN=${token}`);
+    return;
+  }
+
+  if (args.includes("--json")) {
+    print({ token });
+    return;
+  }
+
+  printText(token);
+}
+
 function getFlag(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   if (index === -1) {
@@ -248,6 +329,9 @@ async function main(): Promise<void> {
     case "status":
       await printStatus();
       return;
+    case "sessions":
+      print(await request("/sessions"));
+      return;
     case "tasks":
       print(await request("/tasks"));
       return;
@@ -260,11 +344,29 @@ async function main(): Promise<void> {
     case "dashboard":
       await printDashboard();
       return;
+    case "approvals":
+      await printApprovals(args);
+      return;
+    case "approve":
+      await resolveApproval(args, "approved");
+      return;
+    case "reject":
+      await resolveApproval(args, "rejected");
+      return;
+    case "recent-work":
+      await printRecentWork(args);
+      return;
+    case "continue":
+      await continueRecentWork(args);
+      return;
     case "activity":
       print(await request(`/activity${args[0] ? `?session=${encodeURIComponent(args[0])}` : ""}`));
       return;
     case "config":
       print(await request("/config"));
+      return;
+    case "token":
+      printToken(args);
       return;
     case "pairing":
       await printPairing(args);
@@ -298,7 +400,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.error("Commands: status, agents, dashboard, tasks, submit, activity, config, pairing");
+      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing");
       process.exitCode = 1;
   }
 }

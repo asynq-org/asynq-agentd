@@ -66,6 +66,8 @@ What is still intentionally beta:
 - Contributing guide: [CONTRIBUTING.md](./CONTRIBUTING.md)
 - Security notes: [SECURITY.md](./SECURITY.md)
 - Roadmap: [ROADMAP.md](./ROADMAP.md)
+- Usage examples: [docs/usage.md](./docs/usage.md)
+- API contract: [docs/api.md](./docs/api.md)
 
 ## Run
 
@@ -120,6 +122,9 @@ In another terminal:
 node apps/asynq-agentctl/src/index.ts agents
 node apps/asynq-agentctl/src/index.ts status
 node apps/asynq-agentctl/src/index.ts dashboard
+node apps/asynq-agentctl/src/index.ts approvals
+node apps/asynq-agentctl/src/index.ts recent-work --preview --preview-limit 3
+node apps/asynq-agentctl/src/index.ts token --shell
 node apps/asynq-agentctl/src/index.ts submit "Refactor auth module" --project /tmp/demo --description "Start with the daemon skeleton"
 node apps/asynq-agentctl/src/index.ts submit "Nightly regression run" --project /tmp/demo --schedule "0 2 * * *" --approval-required
 ```
@@ -127,6 +132,8 @@ node apps/asynq-agentctl/src/index.ts submit "Nightly regression run" --project 
 By default the daemon stores state in `.asynq-agentd/` inside this workspace and listens on `http://127.0.0.1:7433`.
 
 Authenticated routes use the token from `.asynq-agentd/auth.json`. The CLI reads it automatically when run from the repo root.
+
+If you want to use the token in your own shell tooling, run `asynq-agentctl token` or `asynq-agentctl token --shell`.
 
 For Buddy mobile pairing, run `node apps/asynq-agentctl/src/index.ts pairing` after the daemon has started once and created `auth.json`. In an interactive terminal the CLI now prints a QR code by default, and the installer guides that flow automatically when possible.
 
