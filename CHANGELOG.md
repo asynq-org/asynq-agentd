@@ -4,6 +4,8 @@ All notable changes to `asynq-agentd` will be documented in this file.
 
 The format is inspired by Keep a Changelog and the project follows SemVer-style `0.x` releases while the runtime is still in early beta.
 
+Release entries below `0.1.0` are currently maintained by Changesets during the automated release flow.
+
 ## [0.1.0] - 2026-03-17
 
 ### Added

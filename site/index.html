@@ -13,47 +13,111 @@
   <body>
     <main class="page">
       <section class="hero">
-        <p class="eyebrow">Open-source daemon runtime</p>
-        <h1>asynq-agentd</h1>
-        <p class="lede">
-          Local daemon and CLI for running and observing coding agents on your own machine.
-          Built to power Asynq Buddy, but useful on its own today.
-        </p>
-        <div class="actions">
-          <a href="https://github.com/asynq-org/asynq-agentd" class="button button-primary">View on GitHub</a>
-          <a href="https://github.com/asynq-org/asynq-agentd#readme" class="button">Read the docs</a>
+        <div class="hero-copy">
+          <p class="eyebrow">Open-source local-first agent runtime</p>
+          <h1>Run coding agents on your own machine. Keep the control plane local.</h1>
+          <p class="lede">
+            <strong>asynq-agentd</strong> is an open-source daemon and operator CLI for Claude Code, Codex, and future coding agents.
+            It handles task orchestration, approvals, recent-work continuity, recovery, and live operator surfaces on top of the machine you already trust.
+          </p>
+          <div class="hero-points">
+            <span>Local daemon</span>
+            <span>Task queue + approvals</span>
+            <span>Recent-work continuity</span>
+            <span>CLI, REST, SSE, WebSocket</span>
+          </div>
+          <div class="actions">
+            <a href="https://github.com/asynq-org/asynq-agentd" class="button button-primary">View on GitHub</a>
+            <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" class="button">Usage examples</a>
+            <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" class="button">API contract</a>
+          </div>
         </div>
+
+        <aside class="hero-shell" aria-label="Example operator workflow">
+          <div class="shell-chrome">
+            <span></span><span></span><span></span>
+          </div>
+          <pre><code>$ asynq-agentctl status
+{
+  "daemon": { "reachable": true },
+  "agents": [
+    { "id": "claude-code", "available": true },
+    { "id": "codex", "available": true }
+  ],
+  "message": "Daemon is running with 2 sessions."
+}
+
+$ asynq-agentctl approvals
+[
+  {
+    "title": "Refactor payments API",
+    "action": "modify 12 files",
+    "next_action": "approve_or_reject"
+  }
+]</code></pre>
+        </aside>
       </section>
 
-      <section class="panel">
-        <h2>What it already does</h2>
-        <ul class="feature-list">
-          <li>Runs Claude Code and Codex through a local daemon</li>
-          <li>Queues tasks, approvals, recurring jobs, and recent-work continuation</li>
-          <li>Exposes REST, SSE, WebSocket, and terminal-oriented control surfaces</li>
-          <li>Ships with a local operator CLI and bootstrap installers</li>
-        </ul>
+      <section class="stats-band">
+        <div>
+          <strong>Claude Code + Codex</strong>
+          <span>real adapters today</span>
+        </div>
+        <div>
+          <strong>REST + SSE + WebSocket</strong>
+          <span>ready for custom dashboards</span>
+        </div>
+        <div>
+          <strong>Approvals + recovery</strong>
+          <span>built into the runtime layer</span>
+        </div>
+        <div>
+          <strong>Buddy-compatible backend</strong>
+          <span>dashboard endpoints already shipped</span>
+        </div>
       </section>
 
       <section class="grid">
         <article class="card">
-          <h3>CLI-first today</h3>
+          <h3>It is not just remote control</h3>
           <p>
-            The open-source repo focuses on the daemon and operator CLI. The full Buddy web and mobile UI live in a separate product repo.
+            `asynq-agentd` sits below the UI layer. It is a local runtime that manages sessions, tasks, approvals, recent work, terminal streams, and restart recovery.
           </p>
         </article>
         <article class="card">
-          <h3>Local-first architecture</h3>
+          <h3>Built for dashboards later</h3>
           <p>
-            Pair a machine you control, keep runtime state local, and use Tailscale or your own network path to reach it remotely.
+            The daemon already exposes dashboard-oriented endpoints for overview, attention-required, and continue-working cards. That same contract is intended to power Asynq Buddy.
           </p>
         </article>
         <article class="card">
-          <h3>Beta by design</h3>
+          <h3>Open-source by design</h3>
           <p>
-            The runtime is already useful, but some adapters, packaging, and onboarding flows are still being hardened in public.
+            The runtime stays open and local-first. The future Buddy product is the polished operator experience on top: better UX, mobile workflows, pairing, and presence-aware notifications.
           </p>
         </article>
+      </section>
+
+      <section class="panel split">
+        <div>
+          <p class="eyebrow">What it already does</p>
+          <h2>Current runtime capabilities</h2>
+          <ul class="feature-list">
+            <li>Runs Claude Code and Codex through a local daemon</li>
+            <li>Queues tasks, dependencies, approvals, and recurring jobs</li>
+            <li>Indexes recent work from Claude and Codex and can continue it</li>
+            <li>Exposes REST, SSE, and WebSocket operator surfaces</li>
+            <li>Streams terminal chunks and accepts simple live control messages</li>
+            <li>Ships with a local CLI plus bootstrap installers for macOS, Linux, and Windows</li>
+          </ul>
+        </div>
+        <div class="callout">
+          <p class="eyebrow">Best fit today</p>
+          <h3>Who is this for?</h3>
+          <p>
+            Developers who want a trustworthy local daemon for coding agents, plus teams that want an open backend contract they can wire into their own dashboards before a full hosted product exists.
+          </p>
+        </div>
       </section>
 
       <section class="panel code-panel">
@@ -61,15 +125,36 @@
         <pre><code>curl -fsSL https://agentd.asynq.org/install.sh | sh</code></pre>
         <pre><code>irm https://agentd.asynq.org/install.ps1 | iex</code></pre>
         <p class="muted">
-          Today the hosted entrypoints are thin wrappers: they clone the repo into a temporary directory and run the real bootstrap installer from source.
+          Today the hosted entrypoints are thin wrappers: they clone the repo into a temporary directory and run the real bootstrap installer from source. Tailscale-aware onboarding is included in the installer flow.
         </p>
       </section>
 
+      <section class="grid two-up">
+        <article class="card">
+          <p class="eyebrow">Read the contract</p>
+          <h3>HTTP, SSE, and WebSocket API</h3>
+          <p>
+            The daemon already exposes enough contract surface to build dashboards, operator tooling, or your own UI on top of it.
+          </p>
+          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" class="text-link">Read API contract</a>
+        </article>
+        <article class="card">
+          <p class="eyebrow">Use it today</p>
+          <h3>CLI-first operator workflow</h3>
+          <p>
+            `asynq-agentctl` can already inspect agents, sessions, approvals, recent work, pairing, dashboard cards, and auth tokens without dropping to raw curl for common tasks.
+          </p>
+          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" class="text-link">Read usage examples</a>
+        </article>
+      </section>
+
       <section class="panel">
-        <h2>Open-source scope</h2>
+        <p class="eyebrow">Open-source scope</p>
+        <h2>The split is intentional</h2>
         <p>
-          `asynq-agentd` is the daemon. Asynq Buddy is the user-facing product built on top of it.
-          That split lets the runtime stay open while the higher-level app evolves separately.
+          <strong>asynq-agentd</strong> is the daemon, runtime contract, and local operator layer.
+          <strong> Asynq Buddy</strong> is the future product experience built on top of it.
+          That split keeps the runtime open, inspectable, and useful on its own while the higher-level UI evolves separately.
         </p>
       </section>
     </main>

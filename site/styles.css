@@ -1,12 +1,15 @@
 :root {
-  --bg: #f3efe3;
-  --paper: rgba(255, 252, 245, 0.82);
-  --ink: #1c2218;
-  --muted: #58604f;
-  --line: rgba(28, 34, 24, 0.12);
-  --accent: #b95c35;
+  --bg: #efe6d2;
+  --paper: rgba(255, 251, 244, 0.84);
+  --paper-strong: rgba(255, 251, 244, 0.95);
+  --ink: #17211c;
+  --muted: #58665e;
+  --line: rgba(23, 33, 28, 0.12);
+  --accent: #c85e32;
   --accent-ink: #fff8f2;
-  --shadow: 0 24px 80px rgba(36, 32, 24, 0.12);
+  --accent-soft: rgba(200, 94, 50, 0.12);
+  --green-soft: rgba(82, 126, 102, 0.12);
+  --shadow: 0 28px 100px rgba(34, 28, 17, 0.14);
 }
 
 * {
@@ -17,9 +20,9 @@ body {
   margin: 0;
   color: var(--ink);
   background:
-    radial-gradient(circle at top left, rgba(185, 92, 53, 0.16), transparent 28%),
-    radial-gradient(circle at top right, rgba(99, 128, 102, 0.18), transparent 30%),
-    linear-gradient(180deg, #faf6ea 0%, #efe8d5 100%);
+    radial-gradient(circle at top left, rgba(200, 94, 50, 0.24), transparent 24%),
+    radial-gradient(circle at top right, rgba(82, 126, 102, 0.18), transparent 28%),
+    linear-gradient(180deg, #fbf4e7 0%, #eadfc8 52%, #e4d8c4 100%);
   font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
 }
 
@@ -39,8 +42,11 @@ body {
 }
 
 .hero {
-  padding: 44px;
+  padding: 36px;
   border-radius: 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 24px;
 }
 
 .eyebrow {
@@ -59,16 +65,36 @@ h3 {
 }
 
 h1 {
-  font-size: clamp(3rem, 8vw, 6rem);
-  line-height: 0.96;
+  font-size: clamp(2.9rem, 7vw, 5.7rem);
+  line-height: 0.95;
+  max-width: 10.5ch;
 }
 
 .lede {
-  max-width: 760px;
+  max-width: 720px;
   margin: 18px 0 0;
   font-size: 1.18rem;
   line-height: 1.6;
   color: var(--muted);
+}
+
+.hero-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.hero-points span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid var(--line);
+  font-size: 0.95rem;
+  color: var(--ink);
 }
 
 .actions {
@@ -97,10 +123,80 @@ h1 {
   border-color: transparent;
 }
 
+.hero-shell {
+  align-self: stretch;
+  border-radius: 28px;
+  border: 1px solid rgba(23, 33, 28, 0.16);
+  background: linear-gradient(180deg, #171d1a 0%, #111513 100%);
+  color: #edf3ec;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.shell-chrome {
+  display: flex;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.shell-chrome span {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.hero-shell pre {
+  margin: 0;
+  padding: 18px 20px 22px;
+  overflow-x: auto;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.stats-band {
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stats-band div {
+  padding: 18px 18px 16px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: var(--shadow);
+}
+
+.stats-band strong,
+.stats-band span {
+  display: block;
+}
+
+.stats-band strong {
+  font-family: "Space Grotesk", "Avenir Next Condensed", sans-serif;
+  font-size: 1.06rem;
+}
+
+.stats-band span {
+  margin-top: 6px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .panel {
   margin-top: 22px;
   padding: 28px;
   border-radius: 24px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 22px;
 }
 
 .grid {
@@ -108,6 +204,10 @@ h1 {
   gap: 22px;
   margin-top: 22px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.two-up {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .card {
@@ -127,6 +227,15 @@ h1 {
   padding-left: 20px;
 }
 
+.callout {
+  padding: 24px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, var(--accent-soft), rgba(255, 255, 255, 0.58)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.42));
+  border: 1px solid var(--line);
+}
+
 .code-panel pre {
   overflow-x: auto;
   margin: 18px 0 0;
@@ -139,6 +248,14 @@ h1 {
 .muted {
   margin-top: 14px;
   color: var(--muted);
+}
+
+.text-link {
+  display: inline-block;
+  margin-top: 16px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
 }
 
 @media (max-width: 860px) {
@@ -155,9 +272,16 @@ h1 {
 
   .hero {
     padding: 28px;
+    grid-template-columns: 1fr;
   }
 
   .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .two-up,
+  .stats-band,
+  .split {
     grid-template-columns: 1fr;
   }
 }
