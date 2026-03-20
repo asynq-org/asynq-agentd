@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+### Minor Changes
+
+- Improve the public operator surface with usage and API contract docs, richer `asynq-agentctl` commands for approvals, recent work, and auth token handling, plus better cross-platform path handling, workflow reliability, and a clearer landing page for `agentd.asynq.org`.
+
 All notable changes to `asynq-agentd` will be documented in this file.
 
 The format is inspired by Keep a Changelog and the project follows SemVer-style `0.x` releases while the runtime is still in early beta.
