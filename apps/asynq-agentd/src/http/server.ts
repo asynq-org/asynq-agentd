@@ -46,6 +46,10 @@ function isAuthorized(req: IncomingMessage, token: string): boolean {
   return header === expected;
 }
 
+function isAuthorizedWebSocket(req: IncomingMessage, url: URL, token: string): boolean {
+  return isAuthorized(req, token) || url.searchParams.get("token") === token;
+}
+
 async function readJson<T>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -66,6 +70,47 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
     "content-length": Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+function sanitizeDebugValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length > 800) {
+      return `${value.slice(0, 800)}… [truncated ${value.length - 800} chars]`;
+    }
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((item) => sanitizeDebugValue(item));
+  }
+
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).slice(0, 40).map(([key, entryValue]) => [
+      key,
+      key.toLowerCase().includes("token") ? "[redacted]" : sanitizeDebugValue(entryValue),
+    ]);
+    return Object.fromEntries(entries);
+  }
+
+  return value;
+}
+
+function debugHttpLog(method: string, path: string, status: number, requestPayload?: unknown, responsePayload?: unknown): void {
+  const enabled = process.env.ASYNQ_AGENTD_DEBUG_HTTP !== "0";
+  if (!enabled) {
+    return;
+  }
+
+  const lines = [
+    `[http] ${method} ${path} -> ${status}`,
+    requestPayload === undefined
+      ? "request: <empty>"
+      : `request: ${JSON.stringify(sanitizeDebugValue(requestPayload), null, 2)}`,
+    responsePayload === undefined
+      ? "response: <empty>"
+      : `response: ${JSON.stringify(sanitizeDebugValue(responsePayload), null, 2)}`,
+  ];
+  console.log(lines.join("\n"));
 }
 
 function beginSse(res: ServerResponse): void {
@@ -171,20 +216,33 @@ export function createHttpServer(services: AppServices) {
     const url = new URL(req.url, "http://127.0.0.1");
     const path = url.pathname;
     const method = req.method.toUpperCase();
+    let requestPayload: unknown;
+    const readBody = async <T>() => {
+      const body = await readJson<T>(req);
+      requestPayload = body;
+      return body;
+    };
+    const send = (status: number, payload: unknown) => {
+      debugHttpLog(method, path, status, requestPayload, payload);
+      sendJson(res, status, payload);
+    };
+    const sendNotFound = () => {
+      send(404, { error: "Not found" });
+    };
 
     try {
       if (!isPublicRoute(method, path) && !isAuthorized(req, services.config.get().auth_token)) {
-        sendJson(res, 401, { error: "Unauthorized" });
+        send(401, { error: "Unauthorized" });
         return;
       }
 
       if (method === "GET" && path === "/health") {
-        sendJson(res, 200, { ok: true });
+        send(200, { ok: true });
         return;
       }
 
       if (method === "GET" && path === "/") {
-        sendJson(res, 200, {
+        send(200, {
           name: "asynq-agentd",
           status: "ok",
           version: "0.1.0-bootstrap",
@@ -193,22 +251,27 @@ export function createHttpServer(services: AppServices) {
       }
 
       if (method === "GET" && path === "/sessions") {
-        sendJson(res, 200, services.sessions.list());
+        send(200, services.sessions.list());
         return;
       }
 
       if (method === "GET" && path === "/dashboard/overview") {
-        sendJson(res, 200, services.dashboard.getOverview());
+        send(200, services.dashboard.getOverview());
         return;
       }
 
       if (method === "GET" && path === "/dashboard/attention-required") {
-        sendJson(res, 200, services.dashboard.getAttentionRequired());
+        send(200, services.dashboard.getAttentionRequired());
         return;
       }
 
       if (method === "GET" && path === "/dashboard/continue-working") {
-        sendJson(res, 200, services.dashboard.getContinueWorking());
+        send(200, services.dashboard.getContinueWorking());
+        return;
+      }
+
+      if (method === "GET" && path === "/managed-sessions") {
+        send(200, services.dashboard.getManagedSessions());
         return;
       }
 
@@ -225,10 +288,10 @@ export function createHttpServer(services: AppServices) {
       if (method === "GET" && sessionMatch) {
         const detail = services.sessions.get(sessionMatch[1]);
         if (!detail) {
-          notFound(res);
+          sendNotFound();
           return;
         }
-        sendJson(res, 200, detail);
+        send(200, detail);
         return;
       }
 
@@ -244,7 +307,7 @@ export function createHttpServer(services: AppServices) {
 
       const sessionTerminalMatch = path.match(/^\/sessions\/([^/]+)\/terminal$/);
       if (method === "GET" && sessionTerminalMatch) {
-        sendJson(res, 200, services.terminalStreams.list(
+        send(200, services.terminalStreams.list(
           sessionTerminalMatch[1],
           parsePositiveInt(url.searchParams.get("limit")) ?? 200,
         ));
@@ -253,54 +316,65 @@ export function createHttpServer(services: AppServices) {
 
       const sessionMessageMatch = path.match(/^\/sessions\/([^/]+)\/message$/);
       if (method === "POST" && sessionMessageMatch) {
-        const body = await readJson<{ message?: string }>(req);
+        const body = await readBody<{ message?: string }>();
         services.sessions.sendMessage(sessionMessageMatch[1], body.message ?? "");
-        sendJson(res, 202, { ok: true });
+        send(202, { ok: true });
         return;
       }
 
       if (method === "DELETE" && sessionMatch) {
-        sendJson(res, 200, services.sessions.stop(sessionMatch[1]));
+        send(200, services.sessions.stop(sessionMatch[1]));
         return;
       }
 
       if (method === "GET" && path === "/tasks") {
-        sendJson(res, 200, services.tasks.list());
+        send(200, services.tasks.list());
         return;
       }
 
       if (method === "POST" && path === "/tasks") {
-        const body = await readJson<CreateTaskInput>(req);
+        const body = await readBody<CreateTaskInput>();
         const task = services.tasks.create(body);
         void services.scheduler.tick();
-        sendJson(res, 201, task);
+        send(201, task);
         return;
       }
 
       const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
       if (method === "PATCH" && taskMatch) {
-        const body = await readJson<Record<string, unknown>>(req);
+        const body = await readBody<Record<string, unknown>>();
         const task = services.tasks.update(taskMatch[1], body);
         void services.scheduler.tick();
-        sendJson(res, 200, task);
+        send(200, task);
         return;
       }
 
       if (method === "DELETE" && taskMatch) {
-        sendJson(res, 200, { deleted: services.tasks.delete(taskMatch[1]) });
+        send(200, { deleted: services.tasks.delete(taskMatch[1]) });
         return;
       }
 
       if (method === "GET" && path === "/approvals") {
         const status = url.searchParams.get("status") ?? undefined;
-        sendJson(res, 200, services.storage.listApprovals(status as never));
+        send(200, services.storage.listApprovals(status as never));
         return;
       }
 
       const approvalMatch = path.match(/^\/approvals\/([^/]+)$/);
+      if (method === "GET" && approvalMatch) {
+        const approval = services.dashboard.getApprovalDetail(approvalMatch[1]);
+        if (!approval) {
+          sendNotFound();
+          return;
+        }
+
+        send(200, approval);
+        return;
+      }
+
       if (method === "POST" && approvalMatch) {
-        const body = await readJson<{ decision: "approved" | "rejected"; note?: string }>(req);
-        sendJson(res, 200, services.sessions.resolveApproval(approvalMatch[1], body.decision, body.note));
+        const body = await readBody<{ decision: "approved" | "rejected"; note?: string }>();
+        send(200, services.sessions.resolveApproval(approvalMatch[1], body.decision, body.note));
         return;
       }
 
@@ -308,7 +382,7 @@ export function createHttpServer(services: AppServices) {
         const recentWorkId = url.searchParams.get("recent_work");
         const limit = url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined;
         if (recentWorkId) {
-          sendJson(res, 200, services.recentWork.listImportedActivity(
+          send(200, services.recentWork.listImportedActivity(
             recentWorkId,
             limit,
             parseCompactParam(url.searchParams.get("compact")),
@@ -316,7 +390,7 @@ export function createHttpServer(services: AppServices) {
           return;
         }
 
-        sendJson(res, 200, services.storage.listActivity({
+        send(200, services.storage.listActivity({
           session_id: url.searchParams.get("session") ?? undefined,
           type: url.searchParams.get("type") ?? undefined,
           limit,
@@ -325,13 +399,13 @@ export function createHttpServer(services: AppServices) {
       }
 
       if (method === "GET" && path === "/stats") {
-        sendJson(res, 200, services.storage.getStats());
+        send(200, services.storage.getStats());
         return;
       }
 
       if (method === "GET" && path === "/config") {
         const config = services.config.getEffective(url.searchParams.get("project_path") ?? undefined);
-        sendJson(res, 200, {
+        send(200, {
           ...config,
           auth_token: "[redacted]",
         });
@@ -339,14 +413,13 @@ export function createHttpServer(services: AppServices) {
       }
 
       if (method === "PATCH" && path === "/config") {
-        const body = await readJson<Partial<DaemonConfig>>(req);
-        sendJson(res, 200, services.config.update(body));
+        const body = await readBody<Partial<DaemonConfig>>();
+        send(200, services.config.update(body));
         return;
       }
 
       if (method === "GET" && path === "/recent-work") {
-        services.recentWork.scan();
-        sendJson(res, 200, services.recentWork.list({
+        send(200, services.recentWork.list({
           includeActivityPreview: parseOptionalBooleanParam(url.searchParams.get("include_activity_preview")),
           previewLimit: parsePositiveInt(url.searchParams.get("activity_preview_limit")) ?? 3,
           compact: parseCompactParam(url.searchParams.get("compact")),
@@ -355,18 +428,29 @@ export function createHttpServer(services: AppServices) {
         return;
       }
 
-      const continueMatch = path.match(/^\/recent-work\/([^/]+)\/continue$/);
-      if (method === "POST" && continueMatch) {
-        const body = await readJson<{ instruction?: string }>(req);
-        const task = services.recentWork.continueRecentWork(continueMatch[1], body.instruction);
-        void services.scheduler.tick();
-        sendJson(res, 201, task);
+      const recentWorkMatch = path.match(/^\/recent-work\/([^/]+)$/);
+      if (method === "GET" && recentWorkMatch) {
+        const detail = services.dashboard.getRecentWorkDetail(recentWorkMatch[1]);
+        if (!detail) {
+          sendNotFound();
+          return;
+        }
+        send(200, detail);
         return;
       }
 
-      notFound(res);
+      const continueMatch = path.match(/^\/recent-work\/([^/]+)\/continue$/);
+      if (method === "POST" && continueMatch) {
+        const body = await readBody<{ instruction?: string }>();
+        const task = services.recentWork.continueRecentWork(continueMatch[1], body.instruction);
+        void services.scheduler.tick();
+        send(201, task);
+        return;
+      }
+
+      sendNotFound();
     } catch (error) {
-      sendJson(res, 500, {
+      send(500, {
         error: error instanceof Error ? error.message : "Unknown server error",
       });
     }
@@ -394,7 +478,7 @@ function handleWebSocketUpgrade(
   const url = new URL(req.url, "http://127.0.0.1");
   const path = url.pathname;
   const method = req.method.toUpperCase();
-  if (method !== "GET" || !isAuthorized(req, services.config.get().auth_token)) {
+  if (method !== "GET" || !isAuthorizedWebSocket(req, url, services.config.get().auth_token)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;

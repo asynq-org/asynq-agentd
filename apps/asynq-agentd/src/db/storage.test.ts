@@ -42,6 +42,19 @@ test("storage persists tasks and sessions", () => {
   assert.equal(storage.listTasks().length, 1);
   assert.equal(storage.listSessions().length, 1);
   assert.equal(storage.getSessionDetail(session.id)?.task?.id, task.id);
+  storage.upsertSummaryCache({
+    key: "continue_card:recent_1",
+    scope: "continue_card",
+    entity_id: "recent_1",
+    input_hash: "hash_1",
+    provider: "claude",
+    content: {
+      title: "Continue payments refactor",
+      summary: "Pick up the refactor from the last completed work block.",
+    },
+    updated_at: new Date().toISOString(),
+  });
+  assert.equal(storage.getSummaryCache("continue_card:recent_1")?.provider, "claude");
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

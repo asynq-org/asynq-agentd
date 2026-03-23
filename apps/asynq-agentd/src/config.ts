@@ -39,6 +39,11 @@ export function createDefaultConfig(): DaemonConfig {
       default: "claude-sonnet",
       fallback: "claude-sonnet",
     },
+    summaries: {
+      enabled: true,
+      provider: "auto",
+      max_input_chars: 6000,
+    },
   };
 }
 

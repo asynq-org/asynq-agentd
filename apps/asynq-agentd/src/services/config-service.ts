@@ -12,10 +12,30 @@ export class ConfigService {
     this.projectConfig = projectConfig;
   }
 
+  private normalizeConfig(config: DaemonConfig): DaemonConfig {
+    const defaults = createDefaultConfig();
+    return {
+      ...defaults,
+      ...config,
+      approval: {
+        ...defaults.approval,
+        ...(config.approval ?? {}),
+      },
+      model_routing: {
+        ...defaults.model_routing,
+        ...(config.model_routing ?? {}),
+      },
+      summaries: {
+        ...defaults.summaries,
+        ...(config.summaries ?? {}),
+      },
+    };
+  }
+
   get(): DaemonConfig {
     const existing = this.storage.getConfig();
     if (existing) {
-      return existing;
+      return this.normalizeConfig(existing);
     }
 
     return this.storage.saveConfig(createDefaultConfig());
@@ -33,6 +53,10 @@ export class ConfigService {
       model_routing: {
         ...current.model_routing,
         ...(patch.model_routing ?? {}),
+      },
+      summaries: {
+        ...current.summaries,
+        ...(patch.summaries ?? {}),
       },
     };
 
@@ -55,6 +79,9 @@ export class ConfigService {
       model_routing: {
         ...globalConfig.model_routing,
         ...(projectConfig.model_routing ?? {}),
+      },
+      summaries: {
+        ...globalConfig.summaries,
       },
     };
   }

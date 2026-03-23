@@ -7,6 +7,7 @@ import type {
   RecentWorkRecord,
   SessionDetail,
   SessionRecord,
+  SummaryCacheRecord,
   StatsSnapshot,
   TerminalChunkRecord,
   TaskRecord,
@@ -110,6 +111,17 @@ export class AsynqAgentdStorage {
         created_at TEXT NOT NULL,
         stream TEXT NOT NULL,
         chunk TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS summary_cache (
+        key TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        session_id TEXT,
+        input_hash TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `);
 
@@ -419,6 +431,44 @@ export class AsynqAgentdStorage {
     return config;
   }
 
+  getSummaryCache(key: string): SummaryCacheRecord | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM summary_cache
+      WHERE key = ?
+    `).get(key) as Record<string, unknown> | undefined;
+    return row ? this.mapSummaryCache(row) : undefined;
+  }
+
+  upsertSummaryCache(record: SummaryCacheRecord): SummaryCacheRecord {
+    this.db.prepare(`
+      INSERT INTO summary_cache (
+        key, scope, entity_id, session_id, input_hash, provider, content_json, updated_at
+      )
+      VALUES (
+        @key, @scope, @entity_id, @session_id, @input_hash, @provider, @content_json, @updated_at
+      )
+      ON CONFLICT(key) DO UPDATE SET
+        scope = excluded.scope,
+        entity_id = excluded.entity_id,
+        session_id = excluded.session_id,
+        input_hash = excluded.input_hash,
+        provider = excluded.provider,
+        content_json = excluded.content_json,
+        updated_at = excluded.updated_at
+    `).run({
+      key: record.key,
+      scope: record.scope,
+      entity_id: record.entity_id,
+      session_id: record.session_id ?? null,
+      input_hash: record.input_hash,
+      provider: record.provider,
+      content_json: JSON.stringify(record.content ?? {}),
+      updated_at: record.updated_at,
+    });
+
+    return record;
+  }
+
   getStats(): StatsSnapshot {
     const sessionsTotal = this.scalar("SELECT COUNT(*) FROM sessions");
     const sessionsActive = this.scalar("SELECT COUNT(*) FROM sessions WHERE state IN ('idle', 'working', 'waiting_approval')");
@@ -537,6 +587,19 @@ export class AsynqAgentdStorage {
       assigned_session_id: typeof row.assigned_session_id === "string" ? row.assigned_session_id : undefined,
       next_run_at: typeof row.next_run_at === "string" ? row.next_run_at : undefined,
       last_run_at: typeof row.last_run_at === "string" ? row.last_run_at : undefined,
+    };
+  }
+
+  private mapSummaryCache(row: Record<string, unknown>): SummaryCacheRecord {
+    return {
+      key: String(row.key),
+      scope: row.scope as SummaryCacheRecord["scope"],
+      entity_id: String(row.entity_id),
+      session_id: typeof row.session_id === "string" ? row.session_id : undefined,
+      input_hash: String(row.input_hash),
+      provider: String(row.provider),
+      content: parseJson<Record<string, unknown>>(row.content_json, {}),
+      updated_at: String(row.updated_at),
     };
   }
 

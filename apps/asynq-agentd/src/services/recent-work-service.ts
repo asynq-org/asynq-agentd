@@ -6,6 +6,7 @@ import { nowIso } from "../utils/time.ts";
 import { parseJsonSafe } from "../utils/json.ts";
 import type { AsynqAgentdStorage } from "../db/storage.ts";
 import { TaskService } from "./task-service.ts";
+import type { EventStreamService } from "./event-stream-service.ts";
 
 const INDEXABLE_EXTENSIONS = new Set([".json", ".jsonl", ".md", ".txt"]);
 const IGNORED_FILE_NAMES = new Set(["settings.json"]);
@@ -38,6 +39,9 @@ interface ClaudeTranscriptEntry {
 interface RecentWorkServiceOptions {
   claudePath: string;
   codexPath: string;
+  events?: EventStreamService;
+  onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
+  onRecentWorkBatchUpdated?: (records: RecentWorkRecord[]) => void;
 }
 
 interface PendingCodexCommand {
@@ -50,14 +54,21 @@ export class RecentWorkService {
   private readonly tasks: TaskService;
   private readonly claudePath: string;
   private readonly codexPath: string;
+  private readonly events?: EventStreamService;
+  private readonly onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
+  private readonly onRecentWorkBatchUpdated?: (records: RecentWorkRecord[]) => void;
   private watchers: Array<ReturnType<typeof watch>> = [];
   private rescanTimer?: NodeJS.Timeout;
+  private rescanInterval?: NodeJS.Timeout;
 
   constructor(storage: AsynqAgentdStorage, tasks: TaskService, options: RecentWorkServiceOptions) {
     this.storage = storage;
     this.tasks = tasks;
     this.claudePath = options.claudePath;
     this.codexPath = options.codexPath;
+    this.events = options.events;
+    this.onRecentWorkUpdated = options.onRecentWorkUpdated;
+    this.onRecentWorkBatchUpdated = options.onRecentWorkBatchUpdated;
   }
 
   list(options?: {
@@ -89,18 +100,37 @@ export class RecentWorkService {
 
   scan(): RecentWorkRecord[] {
     const discovered: RecentWorkRecord[] = [];
+    const changed: RecentWorkRecord[] = [];
     if (existsSync(this.claudePath)) {
       for (const record of this.scanClaude()) {
-        this.storage.upsertRecentWork(record);
-        discovered.push(record);
+        const previous = this.storage.getRecentWork(record.id);
+        const merged = this.mergeWithPreviousRecord(record, previous);
+        this.storage.upsertRecentWork(merged);
+        if (this.didRecentWorkChange(previous, merged)) {
+          this.publishRecentWorkUpdate(merged, previous);
+          this.onRecentWorkUpdated?.(merged);
+          changed.push(merged);
+        }
+        discovered.push(merged);
       }
     }
 
     if (existsSync(this.codexPath)) {
       for (const record of this.scanCodex()) {
-        this.storage.upsertRecentWork(record);
-        discovered.push(record);
+        const previous = this.storage.getRecentWork(record.id);
+        const merged = this.mergeWithPreviousRecord(record, previous);
+        this.storage.upsertRecentWork(merged);
+        if (this.didRecentWorkChange(previous, merged)) {
+          this.publishRecentWorkUpdate(merged, previous);
+          this.onRecentWorkUpdated?.(merged);
+          changed.push(merged);
+        }
+        discovered.push(merged);
       }
+    }
+
+    if (changed.length > 0) {
+      this.onRecentWorkBatchUpdated?.(changed);
     }
 
     return discovered;
@@ -111,7 +141,12 @@ export class RecentWorkService {
       return;
     }
 
-    this.scan();
+    queueMicrotask(() => {
+      this.scan();
+    });
+    this.rescanInterval = setInterval(() => {
+      this.scan();
+    }, 5000);
 
     for (const rootPath of [this.claudePath, this.codexPath]) {
       if (!existsSync(rootPath)) {
@@ -138,6 +173,10 @@ export class RecentWorkService {
     if (this.rescanTimer) {
       clearTimeout(this.rescanTimer);
       this.rescanTimer = undefined;
+    }
+    if (this.rescanInterval) {
+      clearInterval(this.rescanInterval);
+      this.rescanInterval = undefined;
     }
   }
 
@@ -203,6 +242,85 @@ export class RecentWorkService {
     }
 
     return files;
+  }
+
+  private publishRecentWorkUpdate(record: RecentWorkRecord, previous?: RecentWorkRecord): void {
+    if (!this.events) {
+      return;
+    }
+
+    if (!this.didRecentWorkChange(previous, record)) {
+      return;
+    }
+
+    this.events.publish({
+      kind: "summary",
+      session_id: record.id,
+      created_at: nowIso(),
+      payload: {
+        entity_type: "recent_work",
+        entity_id: record.id,
+        scope: "continue_card",
+        provider: "recent-work-scan",
+      },
+    });
+  }
+
+  private mergeWithPreviousRecord(record: RecentWorkRecord, previous?: RecentWorkRecord): RecentWorkRecord {
+    const previousMetadata = previous?.metadata ?? {};
+    const nextMetadata = record.metadata ?? {};
+    const mergedMetadata = {
+      ...previousMetadata,
+      ...nextMetadata,
+    };
+
+    const resolvedTitle = this.resolveStableTitle(record, previous);
+    const resolvedSummary = this.resolveStableSummary(record, previous);
+
+    return {
+      ...record,
+      title: resolvedTitle,
+      summary: resolvedSummary,
+      metadata: mergedMetadata,
+    };
+  }
+
+  private resolveStableTitle(record: RecentWorkRecord, previous?: RecentWorkRecord): string {
+    const metadata = record.metadata ?? {};
+    const previousMetadata = previous?.metadata ?? {};
+    return this.pickString(
+      metadata.thread_name,
+      metadata.summary_title,
+      record.title,
+      previousMetadata.thread_name,
+      previous?.title,
+    ) ?? record.title;
+  }
+
+  private resolveStableSummary(record: RecentWorkRecord, previous?: RecentWorkRecord): string | undefined {
+    const metadata = record.metadata ?? {};
+    return this.pickString(
+      record.summary,
+      metadata.last_agent_message,
+      metadata.last_user_message,
+      metadata.last_reasoning_summary,
+      previous?.summary,
+    );
+  }
+
+  private didRecentWorkChange(previous: RecentWorkRecord | undefined, next: RecentWorkRecord): boolean {
+    if (!previous) {
+      return true;
+    }
+
+    return previous.source_path !== next.source_path
+      || previous.project_path !== next.project_path
+      || previous.title !== next.title
+      || previous.summary !== next.summary
+      || previous.source_type !== next.source_type
+      || previous.status !== next.status
+      || previous.updated_at !== next.updated_at
+      || JSON.stringify(previous.metadata ?? {}) !== JSON.stringify(next.metadata ?? {});
   }
 
   private scanClaude(): RecentWorkRecord[] {
@@ -627,6 +745,7 @@ export class RecentWorkService {
     const records: RecentWorkRecord[] = [];
     const indexPath = join(this.codexPath, "session_index.jsonl");
     const sessionsRoot = join(this.codexPath, "sessions");
+    const indexById = new Map<string, RecentWorkRecord>();
 
     if (existsSync(indexPath)) {
       for (const line of readFileSync(indexPath, "utf8").split("\n")) {
@@ -640,20 +759,25 @@ export class RecentWorkService {
           continue;
         }
 
-        records.push({
+        const indexRecord: RecentWorkRecord = {
           id,
           source_path: indexPath,
-          project_path: undefined,
+          project_path: this.pickString(payload.project_path, payload.projectPath, payload.cwd, payload.repoPath),
           title: this.pickString(payload.thread_name, payload.title) ?? `Codex session ${id}`,
           summary: undefined,
           source_type: "codex-session-index",
           status: "unknown",
           updated_at: this.pickString(payload.updated_at) ?? nowIso(),
-          metadata: payload,
-        });
+          metadata: {
+            ...payload,
+            thread_name: this.pickString(payload.thread_name, payload.title),
+          },
+        };
+        indexById.set(id, indexRecord);
       }
     }
 
+    const fileRecords = new Map<string, RecentWorkRecord>();
     if (existsSync(sessionsRoot)) {
       for (const filePath of this.walk(sessionsRoot, 5)) {
         if (extname(filePath) !== ".jsonl") {
@@ -662,12 +786,45 @@ export class RecentWorkService {
 
         const record = this.parseCodexSessionFile(filePath);
         if (record) {
-          records.push(record);
+          const relatedIndex = indexById.get(record.id);
+          fileRecords.set(record.id, this.mergeCodexRecord(record, relatedIndex));
         }
       }
     }
 
+    for (const record of fileRecords.values()) {
+      records.push(record);
+    }
+
+    for (const [id, indexRecord] of indexById.entries()) {
+      if (!fileRecords.has(id)) {
+        records.push(indexRecord);
+      }
+    }
+
     return records;
+  }
+
+  private mergeCodexRecord(record: RecentWorkRecord, relatedIndex?: RecentWorkRecord): RecentWorkRecord {
+    const metadata = {
+      ...(relatedIndex?.metadata ?? {}),
+      ...(record.metadata ?? {}),
+      thread_name: this.pickString(
+        relatedIndex?.metadata?.thread_name,
+        relatedIndex?.title,
+        record.metadata?.thread_name,
+      ),
+    };
+
+    return {
+      ...record,
+      title: this.pickString(
+        metadata.thread_name,
+        record.title,
+      ) ?? record.title,
+      project_path: this.pickString(record.project_path, relatedIndex?.project_path),
+      metadata,
+    };
   }
 
   private parseCodexSessionFile(filePath: string): RecentWorkRecord | undefined {
@@ -690,6 +847,7 @@ export class RecentWorkService {
     let userMessageCount = 0;
     let agentMessageCount = 0;
     let totalTokens: number | undefined;
+    const filesModified = new Set<string>();
 
     for (const line of lines) {
       const entry = parseJsonSafe<Record<string, unknown>>(line, {});
@@ -731,6 +889,11 @@ export class RecentWorkService {
           summary = message;
           agentMessageCount += 1;
         }
+      }
+
+      const changedFiles = this.extractChangedFilePaths(entry, nestedPayload);
+      for (const file of changedFiles) {
+        filesModified.add(file);
       }
 
       if ((entryType === "reasoning" && typeof entry.payload === "object" && entry.payload) || nestedType === "reasoning") {
@@ -777,6 +940,8 @@ export class RecentWorkService {
         last_user_message: lastUserMessage,
         last_agent_message: lastAgentMessage,
         last_reasoning_summary: lastReasoningSummary,
+        raw_agent_response: lastAgentMessage,
+        changed_files: filesModified.size > 0 ? Array.from(filesModified) : undefined,
         task_started_count: taskStartedCount,
         task_completed_count: taskCompletedCount,
         user_message_count: userMessageCount,
@@ -815,6 +980,37 @@ export class RecentWorkService {
     }
 
     return undefined;
+  }
+
+  private extractChangedFilePaths(entry: Record<string, unknown>, nestedPayload?: Record<string, unknown>): string[] {
+    const payloadCandidates = [entry.payload, nestedPayload];
+    const files = new Set<string>();
+
+    for (const candidate of payloadCandidates) {
+      if (!candidate || typeof candidate !== "object") {
+        continue;
+      }
+
+      const objectPayload = candidate as Record<string, unknown>;
+      if (Array.isArray(objectPayload.files)) {
+        for (const file of objectPayload.files) {
+          if (!file || typeof file !== "object") {
+            continue;
+          }
+          const path = this.pickString((file as Record<string, unknown>).path, (file as Record<string, unknown>).file_path);
+          if (path) {
+            files.add(path);
+          }
+        }
+      }
+
+      const directPath = this.pickString(objectPayload.path, objectPayload.file_path);
+      if (directPath) {
+        files.add(directPath);
+      }
+    }
+
+    return Array.from(files);
   }
 
   private extractReasoningSummary(payload: Record<string, unknown>): string | undefined {

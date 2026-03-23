@@ -40,7 +40,12 @@ asynq-agentctl activity
 asynq-agentctl config
 asynq-agentctl token --shell
 asynq-agentctl pairing
+asynq-agentctl start
+asynq-agentctl stop
+asynq-agentctl restart
 ```
+
+When the daemon was installed as a user service, `start`, `stop`, and `restart` control that service via `launchd` on macOS or `systemd --user` on Linux.
 
 ## Submit a task
 

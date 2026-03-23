@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { TaskService } from "./task-service.ts";
 import { RecentWorkService } from "./recent-work-service.ts";
+import { EventStreamService } from "./event-stream-service.ts";
 
 function encodeClaudeProjectPath(projectPath: string): string {
   return projectPath.replace(/[\\/]/g, "-");
@@ -42,6 +43,60 @@ test("recent work scan indexes claude-like files and continue creates a task", (
   assert.equal(task.agent_type, "claude-code");
   assert.equal(task.project_path, projectRoot);
   assert.equal(task.context?.previous_session_id, indexed[0]!.id);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan publishes an update event when imported work changes", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-events-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const events = new EventStreamService();
+  const published: string[] = [];
+  const claudeRoot = resolve(root, ".claude");
+  const projectRoot = resolve(root, "project");
+  mkdirSync(claudeRoot, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+  const sessionFile = resolve(claudeRoot, "session.json");
+
+  events.subscribe((event) => {
+    if (event.kind === "summary" && event.payload.entity_type === "recent_work") {
+      published.push(event.payload.entity_id);
+    }
+  });
+
+  writeFileSync(sessionFile, JSON.stringify({
+    title: "JWT refactor",
+    projectPath: projectRoot,
+    summary: "Continue fixing failing tests",
+    status: "ended",
+  }));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: claudeRoot,
+    codexPath: resolve(root, ".codex-empty"),
+    events,
+  });
+
+  const firstScan = recentWork.scan();
+  assert.equal(firstScan.length, 1);
+  assert.equal(published.length, 1);
+  assert.equal(published[0], firstScan[0]?.id);
+
+  recentWork.scan();
+  assert.equal(published.length, 1);
+
+  writeFileSync(sessionFile, JSON.stringify({
+    title: "JWT refactor",
+    projectPath: projectRoot,
+    summary: "Continue fixing failing tests and finish middleware cleanup",
+    status: "ended",
+  }));
+
+  recentWork.scan();
+  assert.equal(published.length, 2);
+  assert.equal(published[1], firstScan[0]?.id);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

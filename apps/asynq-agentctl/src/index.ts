@@ -1,10 +1,17 @@
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { homedir, platform } from "node:os";
 import { delimiter, resolve } from "node:path";
 import QRCode from "qrcode";
 
 const baseUrl = process.env.ASYNQ_AGENTD_URL ?? process.env.AGENTD_URL ?? "http://127.0.0.1:7433";
 const publicUrl = process.env.ASYNQ_AGENTD_PUBLIC_URL ?? process.env.AGENTD_PUBLIC_URL ?? baseUrl;
 const runtimeHome = process.env.ASYNQ_AGENTD_HOME ?? process.env.AGENTD_HOME;
+const servicePlatform = platform();
+const launchdLabel = "org.asynq.asynq-agentd";
+const launchdPlistPath = resolve(homedir(), "Library/LaunchAgents", `${launchdLabel}.plist`);
+const systemdUnitName = "asynq-agentd.service";
+const systemdUnitPath = resolve(homedir(), ".config/systemd/user", systemdUnitName);
 
 function resolveToken(): string | undefined {
   if (process.env.ASYNQ_AGENTD_TOKEN) {
@@ -66,15 +73,19 @@ function findExecutable(name: string, extraCandidates: string[] = []): string | 
 }
 
 function inspectAgents() {
+  const home = process.env.HOME ?? homedir();
   const claudePath = process.env.ASYNQ_AGENTD_CLAUDE_BIN
     ?? process.env.CLAUDE_BIN
-    ?? findExecutable("claude", [resolve(process.env.HOME ?? "~", ".local/bin/claude")]);
+    ?? findExecutable("claude", [resolve(home, ".local/bin/claude")]);
   const codexPath = process.env.ASYNQ_AGENTD_CODEX_BIN
     ?? process.env.CODEX_BIN
-    ?? findExecutable("codex");
+    ?? findExecutable("codex", [
+      "/Applications/Codex.app/Contents/Resources/codex",
+      resolve(home, ".local/bin/codex"),
+    ]);
   const opencodePath = process.env.ASYNQ_AGENTD_OPENCODE_BIN
     ?? process.env.OPENCODE_BIN
-    ?? findExecutable("opencode", [resolve(process.env.HOME ?? "~", ".opencode/bin/opencode")]);
+    ?? findExecutable("opencode", [resolve(home, ".opencode/bin/opencode")]);
 
   return [
     {
@@ -301,6 +312,75 @@ function getFlag(args: string[], flag: string): string | undefined {
   return args[index + 1];
 }
 
+function requireInstalledService(): "launchd" | "systemd" {
+  if (servicePlatform === "darwin" && existsSync(launchdPlistPath)) {
+    return "launchd";
+  }
+
+  if (servicePlatform === "linux" && existsSync(systemdUnitPath)) {
+    return "systemd";
+  }
+
+  throw new Error(
+    servicePlatform === "darwin"
+      ? `No installed launchd service found. Install asynq-agentd with service mode 'user' or restart it manually. Expected ${launchdPlistPath}`
+      : servicePlatform === "linux"
+        ? `No installed systemd user service found. Install asynq-agentd with service mode 'user' or restart it manually. Expected ${systemdUnitPath}`
+        : "Service lifecycle commands are not supported on this platform yet. Start asynq-agentd manually.",
+  );
+}
+
+function runServiceLifecycle(action: "start" | "stop" | "restart"): void {
+  const kind = requireInstalledService();
+
+  if (kind === "launchd") {
+    const uid = typeof process.getuid === "function" ? String(process.getuid()) : undefined;
+    if (!uid) {
+      throw new Error("Could not resolve the current macOS user id for launchctl.");
+    }
+
+    const domainTarget = `gui/${uid}/${launchdLabel}`;
+    if (action === "start") {
+      execFileSync("launchctl", ["load", launchdPlistPath], { stdio: "ignore" });
+      print({
+        ok: true,
+        service: "launchd",
+        action,
+        label: launchdLabel,
+      });
+      return;
+    }
+
+    if (action === "stop") {
+      execFileSync("launchctl", ["unload", launchdPlistPath], { stdio: "ignore" });
+      print({
+        ok: true,
+        service: "launchd",
+        action,
+        label: launchdLabel,
+      });
+      return;
+    }
+
+    execFileSync("launchctl", ["kickstart", "-k", domainTarget], { stdio: "ignore" });
+    print({
+      ok: true,
+      service: "launchd",
+      action,
+      label: launchdLabel,
+    });
+    return;
+  }
+
+  execFileSync("systemctl", ["--user", action, systemdUnitName], { stdio: "ignore" });
+  print({
+    ok: true,
+    service: "systemd",
+    action,
+    unit: systemdUnitName,
+  });
+}
+
 async function request(path: string, init?: RequestInit) {
   const token = resolveToken();
   const response = await fetch(`${baseUrl}${path}`, {
@@ -371,6 +451,15 @@ async function main(): Promise<void> {
     case "pairing":
       await printPairing(args);
       return;
+    case "start":
+      runServiceLifecycle("start");
+      return;
+    case "stop":
+      runServiceLifecycle("stop");
+      return;
+    case "restart":
+      runServiceLifecycle("restart");
+      return;
     case "submit": {
       const title = args[0];
       if (!title) {
@@ -400,7 +489,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing");
+      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing, start, stop, restart");
       process.exitCode = 1;
   }
 }

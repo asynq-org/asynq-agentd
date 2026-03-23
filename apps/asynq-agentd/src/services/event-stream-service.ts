@@ -1,10 +1,13 @@
 import type { ActivityPayload, SessionRecord } from "../domain.ts";
 
 export interface LiveEvent {
-  kind: "activity" | "session";
+  kind: "activity" | "session" | "summary";
   session_id: string;
   created_at: string;
-  payload: ActivityPayload | { state: SessionRecord["state"]; adapter: string };
+  payload:
+    | ActivityPayload
+    | { state: SessionRecord["state"]; adapter: string }
+    | { entity_type: "session" | "recent_work"; entity_id: string; scope: "session_card" | "continue_card" | "approval_review"; provider: string };
 }
 
 type Subscriber = {

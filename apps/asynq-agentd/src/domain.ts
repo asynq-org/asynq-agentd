@@ -132,6 +132,12 @@ export interface DaemonConfig {
     default: string;
     fallback: string;
   };
+  summaries: {
+    enabled: boolean;
+    provider: "auto" | "claude" | "codex" | "heuristic" | "none";
+    model?: string;
+    max_input_chars: number;
+  };
 }
 
 export interface SessionDetail extends SessionRecord {
@@ -163,4 +169,23 @@ export interface RecentWorkRecord {
 
 export interface RecentWorkListItem extends RecentWorkRecord {
   activity_preview?: ActivityRecord[];
+}
+
+export interface SummaryCacheRecord {
+  key: string;
+  scope: "session_card" | "continue_card" | "approval_review";
+  entity_id: string;
+  session_id?: string;
+  input_hash: string;
+  provider: string;
+  content: Record<string, unknown>;
+  updated_at: string;
+}
+
+export interface RuntimeAdapterAvailability {
+  id: AgentType;
+  adapter: string;
+  available: boolean;
+  path?: string;
+  mode: "real" | "mock" | "binary-detected-but-daemon-mock";
 }

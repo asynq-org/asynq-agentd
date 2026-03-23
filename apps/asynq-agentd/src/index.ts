@@ -14,6 +14,8 @@ import { EventStreamService } from "./services/event-stream-service.ts";
 import { TerminalStreamService } from "./services/terminal-stream-service.ts";
 import { DashboardService } from "./services/dashboard-service.ts";
 import { createHttpServer } from "./http/server.ts";
+import { RuntimeDiscoveryService } from "./services/runtime-discovery-service.ts";
+import { SummaryService } from "./services/summary-service.ts";
 
 const port = Number(process.env.PORT ?? 7433);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -26,6 +28,13 @@ const liveEvents = new EventStreamService();
 const terminalStreams = new TerminalStreamService(storage);
 const sessions = new SessionService(storage, liveEvents);
 const config = new ConfigService(storage, projectConfig);
+const runtimes = new RuntimeDiscoveryService();
+const summaries = new SummaryService({
+  storage,
+  events: liveEvents,
+  runtimes,
+  getConfig: () => config.get(),
+});
 const adapters = new Map([
   ["claude-code", new ClaudeCliAdapter()],
   ["codex", new CodexCliAdapter({
@@ -38,12 +47,18 @@ const scheduler = new SchedulerService(storage, tasks, sessions, config, adapter
 const recentWork = new RecentWorkService(storage, tasks, {
   claudePath: runtimePaths.claudePath,
   codexPath: runtimePaths.codexPath,
+  events: liveEvents,
+  onRecentWorkBatchUpdated: (records) => {
+    summaries.prepareContinueCards(records);
+  },
 });
 const dashboard = new DashboardService({
   storage,
   tasks,
   sessions,
   recentWork,
+  summaries,
+  runtimes,
 });
 const server = createHttpServer({
   storage,
@@ -57,9 +72,6 @@ const server = createHttpServer({
   dashboard,
 });
 
-scheduler.start(500);
-recentWork.startWatching();
-
 server.on("error", (error) => {
   console.error(`asynq-agentd failed to listen on http://${host}:${port}`);
   console.error(error instanceof Error ? error.message : String(error));
@@ -72,6 +84,8 @@ server.on("error", (error) => {
 server.listen(port, host, () => {
   const activeConfig = config.get();
   writeAuthFile(runtimePaths, activeConfig);
+  scheduler.start(500);
+  recentWork.startWatching();
   console.log(`asynq-agentd listening on http://${host}:${port}`);
   console.log(`runtime db: ${runtimePaths.dbPath}`);
   console.log(`auth token path: ${runtimePaths.authPath}`);

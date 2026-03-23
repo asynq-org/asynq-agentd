@@ -78,6 +78,7 @@ Important notes:
 
 - `GET /approvals`
 - `GET /approvals?status=pending`
+- `GET /approvals/:id`
 - `POST /approvals/:id`
 
 Approval resolution body:
@@ -88,6 +89,8 @@ Approval resolution body:
   "note": "Looks good, continue."
 }
 ```
+
+`GET /approvals/:id` returns the same core approval card shape used by the dashboard, plus a `review` object when the daemon can infer file-level review context from recent activity.
 
 ### Activity
 
@@ -145,11 +148,23 @@ Returns:
 
 - `generated_at`
 - `counts`
+- `runtimes`
 - `sessions`
 - `attention_required`
 - `continue_working`
 
 The intent is to provide enough data for a home screen without multiple round trips.
+
+`counts` currently includes:
+
+- `sessions_active`
+- `sessions_working`
+- `approvals_pending`
+- `tasks_running`
+- `tasks_paused`
+- `runtimes_ready`
+
+`runtimes[]` reflects daemon-detected runtime readiness for adapters such as Claude Code and Codex, so clients can show “ready runtimes” even when no daemon-managed session is currently running.
 
 ### `GET /dashboard/attention-required`
 
@@ -171,6 +186,33 @@ Each item is an approval-oriented card with:
 - `summary`
 - `next_action`
 - `created_at`
+- `review`
+
+`review` currently includes:
+
+- `machine`
+- `agent`
+- `branch`
+- `project`
+- `review_hint`
+- `test_status`
+- `stats.files_changed`
+- `stats.lines_added`
+- `stats.lines_removed`
+- `suggested_actions`
+- `command` (optional)
+- `files[]`
+
+`review.files[]` currently includes:
+
+- `path`
+- `action`
+- `lines_added`
+- `lines_removed`
+- `summary`
+- `diff_preview`
+
+This is intended to support a mobile or web approval detail screen without requiring the client to reconstruct review context from raw activity events.
 
 ### `GET /dashboard/continue-working`
 
@@ -185,6 +227,8 @@ Items are one of:
 - recent-work continuation cards
 
 This is the most direct backend contract for a “Continue working” screen in a future UI.
+
+Continue cards are summary-enriched in the background. The daemon returns a heuristic title and summary immediately, then may refresh those fields asynchronously with a model-backed summary using the best available local runtime.
 
 ## Activity payload types
 
@@ -262,6 +306,8 @@ SSE is recommended for read-only live views and lightweight dashboards.
 - `GET /ws/events`
 - `GET /ws/sessions/:id/events`
 
+Authentication can be supplied either with the usual `Authorization: Bearer <token>` header or, for environments where custom WebSocket headers are awkward, with `?token=<auth_token>` on the socket URL.
+
 These sockets emit JSON messages in the shape:
 
 ```json
@@ -277,6 +323,12 @@ These sockets emit JSON messages in the shape:
   }
 }
 ```
+
+Observed `event` values currently include:
+
+- `activity`
+- `session`
+- `summary`
 
 ### Terminal socket
 
