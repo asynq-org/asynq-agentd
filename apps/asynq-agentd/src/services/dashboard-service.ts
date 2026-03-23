@@ -134,6 +134,15 @@ export class DashboardService {
     }
 
     const metadata = record.metadata ?? {};
+    const rawAgentResponse = this.pickString(
+      metadata.raw_agent_response,
+      metadata.last_agent_message,
+      metadata.last_assistant_message,
+    );
+    const rawUserInput = this.pickString(
+      metadata.raw_user_input,
+      metadata.last_user_message,
+    );
     const fallbackTitle = this.summarizeRecentWorkTitle(record);
     const fallbackSummary = this.summarizeRecentWorkForContinue(record);
     const summarized = this.summaries.readContinueCard(record, fallbackTitle, fallbackSummary);
@@ -145,16 +154,12 @@ export class DashboardService {
       project: this.projectName(record.project_path ?? "Linked project"),
       source_type: record.source_type,
       status: record.status,
+      is_working: record.status === "active",
       summary: summarized.summary,
-      raw_agent_response: this.pickString(
-        metadata.raw_agent_response,
-        metadata.last_agent_message,
-        metadata.last_assistant_message,
-      ),
+      raw_user_input: rawUserInput,
+      raw_agent_response: rawAgentResponse,
       next_move: summarized.nextMove,
-      changed_files: Array.isArray(metadata.changed_files)
-        ? metadata.changed_files.filter((value): value is string => typeof value === "string")
-        : [],
+      changed_files: this.collectChangedFiles(record, rawAgentResponse),
       updated_at: record.updated_at,
     };
   }
@@ -365,7 +370,7 @@ export class DashboardService {
       metadata.last_reasoning_summary,
       record.summary,
     ) ?? this.summarizeRecentWork(record);
-    return this.compactText(candidate);
+    return candidate.trim();
   }
 
   private summarizeRecentWorkTitle(record: RecentWorkRecord): string {
@@ -613,5 +618,61 @@ export class DashboardService {
 
   private pickString(value: unknown): string | undefined {
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  }
+
+  private collectChangedFiles(record: RecentWorkRecord, rawAgentResponse?: string): string[] {
+    const metadata = record.metadata ?? {};
+    const files = new Set<string>();
+
+    if (Array.isArray(metadata.changed_files)) {
+      for (const value of metadata.changed_files) {
+        if (typeof value === "string" && value.trim()) {
+          files.add(value.trim());
+        }
+      }
+    }
+
+    if (rawAgentResponse) {
+      for (const file of this.extractChangedFilesFromText(rawAgentResponse, record.project_path)) {
+        files.add(file);
+      }
+    }
+
+    return Array.from(files);
+  }
+
+  private extractChangedFilesFromText(text: string, projectPath?: string): string[] {
+    const files = new Set<string>();
+    const markdownLinkPattern = /\[[^\]]+\]\(([^)]+\.[A-Za-z0-9]+)\)/g;
+    const absolutePathPattern = /\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]+/g;
+    const relativePathPattern = /(?:^|\n)\s*([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+)(?=\s|$)/gm;
+
+    const pushMatch = (candidate: string) => {
+      const normalized = candidate.trim().replace(/[),.:;]+$/, "");
+      if (!normalized) {
+        return;
+      }
+      if (projectPath && normalized.startsWith(projectPath)) {
+        files.add(normalized);
+        return;
+      }
+      if (normalized.includes("/") && /\.[A-Za-z0-9]+$/.test(normalized)) {
+        files.add(normalized);
+      }
+    };
+
+    for (const match of text.matchAll(markdownLinkPattern)) {
+      pushMatch(match[1] ?? "");
+    }
+
+    for (const match of text.matchAll(absolutePathPattern)) {
+      pushMatch(match[0] ?? "");
+    }
+
+    for (const match of text.matchAll(relativePathPattern)) {
+      pushMatch(match[1] ?? "");
+    }
+
+    return Array.from(files);
   }
 }

@@ -847,9 +847,12 @@ export class RecentWorkService {
     let userMessageCount = 0;
     let agentMessageCount = 0;
     let totalTokens: number | undefined;
+    let lastTaskStartedIndex = -1;
+    let lastTaskCompletedIndex = -1;
+    let lastContentIndex = -1;
     const filesModified = new Set<string>();
 
-    for (const line of lines) {
+    for (const [lineIndex, line] of lines.entries()) {
       const entry = parseJsonSafe<Record<string, unknown>>(line, {});
       const entryType = this.pickString(entry.type);
       const nestedPayload = this.getNestedCodexPayload(entry);
@@ -871,15 +874,21 @@ export class RecentWorkService {
         if (message) {
           lastUserMessage = message;
           userMessageCount += 1;
+          lastContentIndex = lineIndex;
+          if (status === "ended") {
+            status = "active";
+          }
         }
       }
 
       if (entryType === "task_complete" || nestedType === "task_complete") {
         status = "ended";
         taskCompletedCount += 1;
-      } else if ((entryType === "task_started" || nestedType === "task_started") && status !== "ended") {
+        lastTaskCompletedIndex = lineIndex;
+      } else if (entryType === "task_started" || nestedType === "task_started") {
         status = "active";
         taskStartedCount += 1;
+        lastTaskStartedIndex = lineIndex;
       }
 
       if (entryType === "agent_message" || nestedType === "agent_message") {
@@ -888,6 +897,10 @@ export class RecentWorkService {
           lastAgentMessage = message;
           summary = message;
           agentMessageCount += 1;
+          lastContentIndex = lineIndex;
+          if (status === "ended") {
+            status = "active";
+          }
         }
       }
 
@@ -905,6 +918,10 @@ export class RecentWorkService {
           lastReasoningSummary = reasoningSummary;
           if (!summary) {
             summary = reasoningSummary;
+          }
+          lastContentIndex = lineIndex;
+          if (status === "ended") {
+            status = "active";
           }
         }
       }
@@ -926,6 +943,12 @@ export class RecentWorkService {
       return undefined;
     }
 
+    if (lastTaskCompletedIndex > lastTaskStartedIndex && lastContentIndex <= lastTaskCompletedIndex) {
+      status = "ended";
+    } else if (lastContentIndex > lastTaskCompletedIndex || taskStartedCount > taskCompletedCount) {
+      status = "active";
+    }
+
     return {
       id: sessionId,
       source_path: filePath,
@@ -937,6 +960,7 @@ export class RecentWorkService {
       updated_at: stats.mtime.toISOString(),
       metadata: {
         lines: lines.length,
+        raw_user_input: lastUserMessage,
         last_user_message: lastUserMessage,
         last_agent_message: lastAgentMessage,
         last_reasoning_summary: lastReasoningSummary,

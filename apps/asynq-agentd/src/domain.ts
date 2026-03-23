@@ -137,6 +137,7 @@ export interface DaemonConfig {
     provider: "auto" | "claude" | "codex" | "heuristic" | "none";
     model?: string;
     max_input_chars: number;
+    debug: boolean;
   };
 }
 

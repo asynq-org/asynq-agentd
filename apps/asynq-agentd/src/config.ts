@@ -7,6 +7,7 @@ export interface RuntimePaths {
   root: string;
   dbPath: string;
   authPath: string;
+  logPath: string;
   claudePath: string;
   codexPath: string;
 }
@@ -20,6 +21,7 @@ export function resolveRuntimePaths(cwd: string): RuntimePaths {
     root,
     dbPath: resolve(root, "asynq-agentd.sqlite"),
     authPath: resolve(root, "auth.json"),
+    logPath: resolve(root, "asynq-agentd.log"),
     claudePath: process.env.CLAUDE_HOME ? resolve(process.env.CLAUDE_HOME) : resolve(process.env.HOME ?? "~", ".claude"),
     codexPath: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME) : resolve(process.env.HOME ?? "~", ".codex"),
   };
@@ -43,6 +45,7 @@ export function createDefaultConfig(): DaemonConfig {
       enabled: true,
       provider: "auto",
       max_input_chars: 6000,
+      debug: false,
     },
   };
 }

@@ -16,10 +16,12 @@ import { DashboardService } from "./services/dashboard-service.ts";
 import { createHttpServer } from "./http/server.ts";
 import { RuntimeDiscoveryService } from "./services/runtime-discovery-service.ts";
 import { SummaryService } from "./services/summary-service.ts";
+import { initializeLogger } from "./logger.ts";
 
 const port = Number(process.env.PORT ?? 7433);
 const host = process.env.HOST ?? "127.0.0.1";
 const runtimePaths = resolveRuntimePaths(cwd());
+initializeLogger(runtimePaths.logPath);
 
 const storage = new AsynqAgentdStorage(runtimePaths.dbPath);
 const projectConfig = new ProjectConfigService();

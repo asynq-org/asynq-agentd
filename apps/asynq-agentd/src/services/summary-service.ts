@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolve } from "node:path";
 import type { AsynqAgentdStorage } from "../db/storage.ts";
 import type { DaemonConfig, RecentWorkRecord, SessionRecord, SummaryCacheRecord } from "../domain.ts";
 import { parseJsonSafe } from "../utils/json.ts";
@@ -153,8 +154,19 @@ class CodexSummaryProvider implements SummaryProvider {
     const tempRoot = await mkdtemp(join(tmpdir(), "asynq-summary-codex-"));
     const schemaPath = join(tempRoot, "summary-schema.json");
     const outputPath = join(tempRoot, "summary-output.json");
+    const sourceHome = resolve(process.env.CODEX_HOME ?? join(process.env.HOME ?? "~", ".codex"));
 
     try {
+      for (const name of ["auth.json", "models_cache.json", ".codex-global-state.json"]) {
+        const source = join(sourceHome, name);
+        const target = join(tempRoot, name);
+        try {
+          await cp(source, target, { force: true });
+        } catch {
+          // Missing auth/config files should not crash summary generation.
+        }
+      }
+
       await writeFile(schemaPath, JSON.stringify(params.schema, null, 2), "utf8");
       await execFileJson(runtime.path, [
         "exec",
@@ -186,6 +198,15 @@ function sanitizeTitle(value: string | undefined, fallback: string): string {
 
 function sanitizeSummary(value: string | undefined, fallback: string): string {
   return compactText(value?.trim() || fallback, 160);
+}
+
+function sanitizeContinueSummary(value: string | undefined, fallback: string): string {
+  const normalized = (value?.trim() || fallback).replace(/\s+\n/g, "\n").trim();
+  if (normalized.length <= 1200) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 1199).trimEnd()}…`;
 }
 
 export class SummaryService {
@@ -258,7 +279,7 @@ export class SummaryService {
   readContinueCard(record: RecentWorkRecord, fallbackTitle: string, fallbackSummary: string): ContinueSummaryResult {
     const metadata = record.metadata ?? {};
     const input = {
-      format_version: 3,
+      format_version: 4,
       title: record.title,
       fallback_title: fallbackTitle,
       source_type: record.source_type,
@@ -276,14 +297,14 @@ export class SummaryService {
     if (cached?.input_hash === inputHash) {
       return {
         title: sanitizeTitle(pickString(cached.content.title), fallbackTitle),
-        summary: sanitizeSummary(pickString(cached.content.summary), fallbackSummary),
+        summary: sanitizeContinueSummary(pickString(cached.content.summary), fallbackSummary),
         nextMove: pickString(cached.content.next_move),
       };
     }
 
     return {
       title: sanitizeTitle(fallbackTitle, record.title),
-      summary: sanitizeSummary(fallbackSummary, fallbackSummary),
+      summary: sanitizeContinueSummary(fallbackSummary, fallbackSummary),
     };
   }
 
@@ -329,7 +350,7 @@ export class SummaryService {
       return {
         id,
         input: {
-          format_version: 3,
+          format_version: 4,
           title: record.title,
           fallback_title: fallbackTitle,
           source_type: record.source_type,
@@ -359,6 +380,34 @@ export class SummaryService {
 
     this.inflight.add(batchKey);
     const model = this.getConfig().summaries.model;
+    const prompt = [
+      "Rewrite recent work into structured continuation summaries for Asynq Buddy.",
+      "Respond as JSON matching the schema.",
+      "For each item:",
+      "- preserve a clean existing thread title when available",
+      "- for Codex, prefer thread_name over the first raw prompt whenever available",
+      "- summary should be a compact but informative multi-sentence recap of the latest completed state",
+      "- summary may use short markdown bullet points when helpful",
+      "- summary should mention concrete progress and blockers when they are obvious from the input",
+      "- do not just repeat the first sentence of the last agent message",
+      "- next_move is optional and should be a short concrete next step if the latest agent response suggests one",
+      "- never output encoded text, JSON, or file-path noise as title or summary",
+      "",
+      JSON.stringify(staleInputs, null, 2),
+    ].join("\n");
+    if (this.getConfig().summaries.debug) {
+      console.log("[summary-service] continue batch request", JSON.stringify({
+        provider: provider.id,
+        preferredProviderId,
+        model,
+        batchKey,
+        itemCount: staleInputs.length,
+        itemIds: staleInputs.map((entry) => entry.id),
+        cwd: staleInputs.find((entry) => entry.input.project_path)?.input.project_path,
+        prompt,
+      }, null, 2));
+    }
+
     void provider.summarize({
       cwd: staleInputs.find((entry) => entry.input.project_path)?.input.project_path,
       schema: {
@@ -374,28 +423,33 @@ export class SummaryService {
                 id: { type: "string" },
                 title: { type: "string" },
                 summary: { type: "string" },
-                next_move: { type: "string" },
+                next_move: {
+                  anyOf: [
+                    { type: "string" },
+                    { type: "null" },
+                  ],
+                },
               },
-              required: ["id", "title", "summary"],
+              required: ["id", "title", "summary", "next_move"],
             },
           },
         },
         required: ["items"],
       },
-      prompt: [
-        "Rewrite recent work into compact mobile cards for Asynq Buddy.",
-        "Respond as JSON matching the schema.",
-        "For each item:",
-        "- preserve a clean existing thread title when available",
-        "- for Codex, prefer thread_name over the first raw prompt whenever available",
-        "- summary must be one factual sentence under 160 characters",
-        "- next_move is optional and should be a short concrete next step if the latest agent response suggests one",
-        "- never output encoded text, JSON, or file-path noise as title or summary",
-        "",
-        JSON.stringify(staleInputs, null, 2),
-      ].join("\n"),
+      prompt,
       model,
     }).then((payload) => {
+      if (this.getConfig().summaries.debug) {
+        console.log("[summary-service] continue batch response", JSON.stringify({
+          provider: provider.id,
+          preferredProviderId,
+          model,
+          batchKey,
+          itemCount: staleInputs.length,
+          itemIds: staleInputs.map((entry) => entry.id),
+          payload,
+        }, null, 2));
+      }
       const items = Array.isArray(payload.items) ? payload.items : [];
       for (const entry of staleInputs) {
         const id = entry.id;
@@ -404,7 +458,7 @@ export class SummaryService {
         const match = items.find((item) => item && typeof item === "object" && pickString((item as Record<string, unknown>).id) === id) as Record<string, unknown> | undefined;
         const content = {
           title: sanitizeTitle(pickString(match?.title), fallbackTitle),
-          summary: sanitizeSummary(pickString(match?.summary), fallbackSummary),
+          summary: sanitizeContinueSummary(pickString(match?.summary), fallbackSummary),
           next_move: pickString(match?.next_move),
         };
         this.storage.upsertSummaryCache({
@@ -428,7 +482,24 @@ export class SummaryService {
           },
         });
       }
-    }).catch(() => {
+    }).catch((error: unknown) => {
+      if (this.getConfig().summaries.debug) {
+        console.error("[summary-service] continue batch error", JSON.stringify({
+          provider: provider.id,
+          preferredProviderId,
+          model,
+          batchKey,
+          itemCount: staleInputs.length,
+          itemIds: staleInputs.map((entry) => entry.id),
+          error: error instanceof Error
+            ? {
+                name: error.name,
+                message: error.message,
+                stack: error.stack,
+              }
+            : String(error),
+        }, null, 2));
+      }
       // Heuristic fallback remains active.
     }).finally(() => {
       this.inflight.delete(batchKey);

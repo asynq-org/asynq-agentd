@@ -43,9 +43,16 @@ asynq-agentctl pairing
 asynq-agentctl start
 asynq-agentctl stop
 asynq-agentctl restart
+asynq-agentctl debug status
+asynq-agentctl debug on
+asynq-agentctl debug off
+asynq-agentctl logs --lines 200
+asynq-agentctl logs --follow
 ```
 
 When the daemon was installed as a user service, `start`, `stop`, and `restart` control that service via `launchd` on macOS or `systemd --user` on Linux.
+
+`logs` reads the daemon log file from the runtime home. By default it shows the combined `asynq-agentd.log`; `--stdout` and `--stderr` can read the launchd-managed stream files instead.
 
 ## Submit a task
 

@@ -1,7 +1,8 @@
-import { accessSync, constants, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, createReadStream, existsSync, readFileSync, statSync, watchFile, unwatchFile } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, platform } from "node:os";
 import { delimiter, resolve } from "node:path";
+import { stdin as input, stdout as output } from "node:process";
 import QRCode from "qrcode";
 
 const baseUrl = process.env.ASYNQ_AGENTD_URL ?? process.env.AGENTD_URL ?? "http://127.0.0.1:7433";
@@ -12,6 +13,10 @@ const launchdLabel = "org.asynq.asynq-agentd";
 const launchdPlistPath = resolve(homedir(), "Library/LaunchAgents", `${launchdLabel}.plist`);
 const systemdUnitName = "asynq-agentd.service";
 const systemdUnitPath = resolve(homedir(), ".config/systemd/user", systemdUnitName);
+const runtimeRoot = runtimeHome ? resolve(runtimeHome) : resolve(process.cwd(), ".asynq-agentd");
+const combinedLogPath = resolve(runtimeRoot, "asynq-agentd.log");
+const stdoutLogPath = resolve(runtimeRoot, "asynq-agentd.stdout.log");
+const stderrLogPath = resolve(runtimeRoot, "asynq-agentd.stderr.log");
 
 function resolveToken(): string | undefined {
   if (process.env.ASYNQ_AGENTD_TOKEN) {
@@ -227,6 +232,36 @@ async function printDashboard(): Promise<void> {
   print(overview);
 }
 
+async function toggleDebug(args: string[]): Promise<void> {
+  const action = args[0];
+  if (!action || !["on", "off", "status"].includes(action)) {
+    throw new Error("Usage: debug <on|off|status>");
+  }
+
+  if (action === "status") {
+    const config = await request("/config");
+    print({
+      summaries_debug: Boolean(config?.summaries?.debug),
+    });
+    return;
+  }
+
+  const enabled = action === "on";
+  const updated = await request("/config", {
+    method: "PATCH",
+    body: JSON.stringify({
+      summaries: {
+        debug: enabled,
+      },
+    }),
+  });
+
+  print({
+    ok: true,
+    summaries_debug: Boolean(updated?.summaries?.debug),
+  });
+}
+
 async function printApprovals(args: string[]): Promise<void> {
   const status = getFlag(args, "--status") ?? "pending";
   print(await request(`/approvals?status=${encodeURIComponent(status)}`));
@@ -310,6 +345,95 @@ function getFlag(args: string[], flag: string): string | undefined {
     return undefined;
   }
   return args[index + 1];
+}
+
+function resolveLogPath(args: string[]): string {
+  if (args.includes("--stdout")) {
+    return stdoutLogPath;
+  }
+
+  if (args.includes("--stderr")) {
+    return stderrLogPath;
+  }
+
+  return combinedLogPath;
+}
+
+function resolveExistingLogPath(args: string[]): string {
+  const preferred = resolveLogPath(args);
+  if (existsSync(preferred)) {
+    return preferred;
+  }
+
+  if (!args.includes("--stdout") && !args.includes("--stderr")) {
+    if (existsSync(stdoutLogPath)) {
+      return stdoutLogPath;
+    }
+
+    if (existsSync(stderrLogPath)) {
+      return stderrLogPath;
+    }
+  }
+
+  return preferred;
+}
+
+async function printLogs(args: string[]): Promise<void> {
+  const logPath = resolveExistingLogPath(args);
+  const lineCount = Number(getFlag(args, "--lines") ?? "100");
+  if (!existsSync(logPath)) {
+    throw new Error(`No log file found yet at ${logPath}`);
+  }
+
+  const content = readFileSync(logPath, "utf8");
+  const lines = content.trimEnd().split("\n");
+  const tail = lines.slice(-Math.max(1, lineCount)).join("\n");
+  if (tail) {
+    printText(tail);
+  }
+
+  if (!args.includes("--follow")) {
+    return;
+  }
+
+  let offset = statSync(logPath).size;
+  const onChange = (current: { size: number }, previous: { size: number }) => {
+    if (current.size < previous.size) {
+      offset = 0;
+    }
+
+    if (current.size <= offset) {
+      return;
+    }
+
+    const stream = createReadStream(logPath, {
+      encoding: "utf8",
+      start: offset,
+      end: current.size - 1,
+    });
+
+    stream.on("data", (chunk) => {
+      output.write(chunk);
+    });
+
+    stream.on("end", () => {
+      offset = current.size;
+    });
+  };
+
+  watchFile(logPath, { interval: 500 }, onChange);
+  await new Promise<void>((resolvePromise) => {
+    const stop = () => {
+      unwatchFile(logPath, onChange);
+      input.off("data", stop);
+      resolvePromise();
+    };
+
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
+    input.resume();
+    input.on("data", stop);
+  });
 }
 
 function requireInstalledService(): "launchd" | "systemd" {
@@ -423,6 +547,12 @@ async function main(): Promise<void> {
       return;
     case "dashboard":
       await printDashboard();
+      return;
+    case "debug":
+      await toggleDebug(args);
+      return;
+    case "logs":
+      await printLogs(args);
       return;
     case "approvals":
       await printApprovals(args);
