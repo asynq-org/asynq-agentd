@@ -127,6 +127,8 @@ node apps/asynq-agentctl/src/index.ts approvals
 node apps/asynq-agentctl/src/index.ts recent-work --preview --preview-limit 3
 node apps/asynq-agentctl/src/index.ts token --shell
 node apps/asynq-agentctl/src/index.ts restart
+node apps/asynq-agentctl/src/index.ts tls status
+node apps/asynq-agentctl/src/index.ts tls enable --cert /path/to/cert.pem --key /path/to/key.pem
 node apps/asynq-agentctl/src/index.ts submit "Refactor auth module" --project /tmp/demo --description "Start with the daemon skeleton"
 node apps/asynq-agentctl/src/index.ts submit "Nightly regression run" --project /tmp/demo --schedule "0 2 * * *" --approval-required
 ```
@@ -138,6 +140,8 @@ Authenticated routes use the token from `.asynq-agentd/auth.json`. The CLI reads
 If you want to use the token in your own shell tooling, run `asynq-agentctl token` or `asynq-agentctl token --shell`.
 
 For Buddy mobile pairing, run `node apps/asynq-agentctl/src/index.ts pairing` after the daemon has started once and created `auth.json`. In an interactive terminal the CLI now prints a QR code by default, and the installer guides that flow automatically when possible.
+
+For production iPhone pairing, prefer an `https://...` public daemon URL. The daemon can now bind HTTPS directly when TLS is enabled in config (for example via `asynq-agentctl tls enable --cert ... --key ...` followed by a restart), and Buddy will automatically upgrade its live transport from `ws://` to `wss://`.
 
 Codex-backed tasks currently expect a working `codex` CLI on `PATH` (or `ASYNQ_AGENTD_CODEX_BIN` pointing to it). Claude-backed tasks expect a working `claude` CLI on `PATH` or at `~/.local/bin/claude` (or `ASYNQ_AGENTD_CLAUDE_BIN` pointing to it), plus an authenticated Claude Code session.
 

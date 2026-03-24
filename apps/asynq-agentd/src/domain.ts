@@ -11,6 +11,9 @@ export type AgentType = "claude-code" | "codex" | "opencode" | "custom";
 
 export interface TaskContext {
   previous_session_id?: string;
+  parent_session_id?: string;
+  source_recent_work_id?: string;
+  source_recent_work_updated_at?: string;
   files_to_focus?: string[];
   test_command?: string;
 }
@@ -102,6 +105,7 @@ export type ActivityPayload =
   | { type: "approval_resolved"; action: string; decision: "approved" | "rejected" }
   | { type: "error"; message: string; recoverable: boolean }
   | { type: "agent_thinking"; summary: string }
+  | { type: "agent_output"; message: string }
   | { type: "session_state_change"; from: SessionState | "unknown"; to: SessionState };
 
 export interface ActivityRecord {
@@ -122,6 +126,11 @@ export interface TerminalChunkRecord {
 export interface DaemonConfig {
   auth_token: string;
   max_parallel_sessions: number;
+  tls: {
+    enabled: boolean;
+    cert_path?: string;
+    key_path?: string;
+  };
   approval: {
     always_require: string[];
     never_require: string[];

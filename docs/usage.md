@@ -46,6 +46,9 @@ asynq-agentctl restart
 asynq-agentctl debug status
 asynq-agentctl debug on
 asynq-agentctl debug off
+asynq-agentctl tls status
+asynq-agentctl tls enable --cert /path/to/cert.pem --key /path/to/key.pem
+asynq-agentctl tls disable
 asynq-agentctl logs --lines 200
 asynq-agentctl logs --follow
 ```
@@ -53,6 +56,8 @@ asynq-agentctl logs --follow
 When the daemon was installed as a user service, `start`, `stop`, and `restart` control that service via `launchd` on macOS or `systemd --user` on Linux.
 
 `logs` reads the daemon log file from the runtime home. By default it shows the combined `asynq-agentd.log`; `--stdout` and `--stderr` can read the launchd-managed stream files instead.
+
+`tls` updates the daemon TLS settings stored in config. After `enable` or `disable`, restart the daemon so it can rebind with the new transport. When TLS is enabled, pair Buddy against an `https://...` public URL and the mobile client will automatically switch its live event transport from `ws://` to `wss://`.
 
 ## Submit a task
 

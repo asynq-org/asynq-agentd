@@ -17,6 +17,10 @@ export class ConfigService {
     return {
       ...defaults,
       ...config,
+      tls: {
+        ...defaults.tls,
+        ...(config.tls ?? {}),
+      },
       approval: {
         ...defaults.approval,
         ...(config.approval ?? {}),
@@ -46,6 +50,10 @@ export class ConfigService {
     const merged: DaemonConfig = {
       ...current,
       ...patch,
+      tls: {
+        ...current.tls,
+        ...(patch.tls ?? {}),
+      },
       approval: {
         ...current.approval,
         ...(patch.approval ?? {}),

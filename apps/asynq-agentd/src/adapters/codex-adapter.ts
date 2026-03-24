@@ -179,6 +179,7 @@ export class CodexCliAdapter implements AgentAdapter {
         "exec",
         "resume",
         "--json",
+        "--skip-git-repo-check",
         ...(model ? ["-m", model] : []),
         resumeSessionId,
         prompt,
@@ -259,12 +260,45 @@ export class CodexCliAdapter implements AgentAdapter {
     pendingCommands: Map<string, PendingCommand>,
   ): ActivityPayload[] {
     const entryType = this.pickString(entry.type);
-    const payload = typeof entry.payload === "object" && entry.payload ? entry.payload as Record<string, unknown> : undefined;
+    const payload = this.getNestedPayload(entry);
     const nestedType = this.pickString(payload?.type);
+    const item = typeof entry.item === "object" && entry.item ? entry.item as Record<string, unknown> : undefined;
+    const itemType = this.pickString(item?.type);
 
     if (entryType === "event_msg" && nestedType === "agent_message") {
       const message = this.pickString(payload?.message);
-      return message ? [{ type: "agent_thinking", summary: message }] : [];
+      return message ? [
+        { type: "agent_output", message },
+        { type: "agent_thinking", summary: message },
+      ] : [];
+    }
+
+    if (entryType === "item.completed" && itemType === "agent_message") {
+      const message = this.pickString(item?.text);
+      return message ? [
+        { type: "agent_output", message },
+        { type: "agent_thinking", summary: message },
+      ] : [];
+    }
+
+    if ((entryType === "item.started" || entryType === "item.completed") && itemType === "command_execution") {
+      const command = this.pickString(item?.command);
+      if (!command) {
+        return [];
+      }
+
+      if (entryType === "item.started") {
+        return [{ type: "agent_thinking", summary: `Running command: ${command}` }];
+      }
+
+      const exitCode = typeof item?.exit_code === "number" ? item.exit_code : 0;
+      return [{
+        type: "command_run",
+        cmd: command,
+        exit_code: exitCode,
+        duration_ms: 0,
+        stdout_preview: this.pickString(item?.aggregated_output),
+      }];
     }
 
     if (entryType === "response_item" && nestedType === "reasoning") {
@@ -331,6 +365,18 @@ export class CodexCliAdapter implements AgentAdapter {
     }
 
     return [];
+  }
+
+  private getNestedPayload(entry: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (typeof entry.payload === "object" && entry.payload) {
+      return entry.payload as Record<string, unknown>;
+    }
+
+    if (typeof entry.item === "object" && entry.item) {
+      return entry.item as Record<string, unknown>;
+    }
+
+    return undefined;
   }
 
   private describeCommand(payload: Record<string, unknown>): string {

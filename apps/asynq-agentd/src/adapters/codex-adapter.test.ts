@@ -153,6 +153,7 @@ console.log(JSON.stringify({
   assert.ok(argv.includes("--json"));
   assert.ok(argv.includes("--cd"));
   assert.ok(argv.includes(projectRoot));
+  assert.ok(events.some((payload) => payload.type === "agent_output" && payload.message === "Working on the requested task."));
   assert.ok(events.some((payload) => payload.type === "agent_thinking"));
   assert.ok(events.some((payload) => payload.type === "command_intent" && payload.cmd === "pnpm test"));
   assert.ok(events.some((payload) => payload.type === "command_run" && payload.cmd === "pnpm test"));
@@ -197,7 +198,13 @@ writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.sl
   );
 
   const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
-  assert.deepEqual(argv.slice(0, 4), ["exec", "resume", "--json", "019cda49-9e87-7a13-a4e8-7dddb62a9d99"]);
+  assert.deepEqual(argv.slice(0, 5), [
+    "exec",
+    "resume",
+    "--json",
+    "--skip-git-repo-check",
+    "019cda49-9e87-7a13-a4e8-7dddb62a9d99",
+  ]);
 
   rmSync(root, { recursive: true, force: true });
 });

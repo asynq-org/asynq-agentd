@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AsynqAgentdStorage } from "../db/storage.ts";
@@ -278,6 +278,57 @@ test("dashboard service filters noisy and duplicate continue items", () => {
   assert.ok(continueWorking.items.every((item) => item.kind === "recent_work"));
   assert.ok(continueWorking.items.every((item) => /owner/i.test(item.title)));
   assert.ok(continueWorking.items.every((item) => !/^Continue Codex$/i.test(item.title)));
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service refreshes recent-work detail from disk before returning observed detail", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const codexPath = join(root, "codex");
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath,
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+    providers: [],
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  const sessionDir = join(codexPath, "sessions", "2026", "03", "24");
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionPath = join(sessionDir, "session-1.jsonl");
+
+  writeFileSync(sessionPath, [
+    JSON.stringify({ type: "session_meta", payload: { id: "session-1", cwd: "/tmp/demo" } }),
+    JSON.stringify({ type: "user_message", payload: { text: "Fix the dashboard session detail" } }),
+    JSON.stringify({ type: "agent_message", payload: { message: "Initial observed summary" } }),
+  ].join("\n"));
+  recentWork.scan();
+
+  writeFileSync(sessionPath, [
+    JSON.stringify({ type: "session_meta", payload: { id: "session-1", cwd: "/tmp/demo" } }),
+    JSON.stringify({ type: "user_message", payload: { text: "Fix the dashboard session detail" } }),
+    JSON.stringify({ type: "agent_message", payload: { message: "Fresh observed summary after more work" } }),
+  ].join("\n"));
+
+  const detail = dashboard.getRecentWorkDetail("session-1");
+  assert.equal(detail?.summary, "Fresh observed summary after more work");
+  assert.equal(detail?.raw_agent_response, "Fresh observed summary after more work");
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

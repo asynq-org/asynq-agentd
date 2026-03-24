@@ -42,7 +42,7 @@ test("recent work scan indexes claude-like files and continue creates a task", (
   const task = recentWork.continueRecentWork(indexed[0]!.id, "Fix the test failures");
   assert.equal(task.agent_type, "claude-code");
   assert.equal(task.project_path, projectRoot);
-  assert.equal(task.context?.previous_session_id, indexed[0]!.id);
+  assert.equal(task.context?.source_recent_work_id, indexed[0]!.id);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });
@@ -519,6 +519,7 @@ test("recent work scan indexes Codex session index and session files", () => {
   assert.match(task.description, /Last user request: Implement recent work parsing/);
   assert.match(task.description, /Last agent update: I found the session metadata and will wire it into recent-work\./);
   assert.ok(task.context?.files_to_focus?.includes(projectRoot));
+  assert.equal(task.context?.source_recent_work_id, "codex-session-1");
 
   const activity = recentWork.listImportedActivity("codex-session-1");
   const rawActivity = recentWork.listImportedActivity("codex-session-1", undefined, false);

@@ -6,6 +6,7 @@ import { TaskService } from "./task-service.ts";
 import { nowIso } from "../utils/time.ts";
 import { SummaryService } from "./summary-service.ts";
 import { RuntimeDiscoveryService } from "./runtime-discovery-service.ts";
+import { parseJsonSafe } from "../utils/json.ts";
 
 interface DashboardServiceOptions {
   storage: AsynqAgentdStorage;
@@ -23,6 +24,7 @@ export class DashboardService {
   private readonly recentWork: RecentWorkService;
   private readonly summaries: SummaryService;
   private readonly runtimes: RuntimeDiscoveryService;
+  private lastRecentWorkRefreshAt = 0;
 
   constructor(options: DashboardServiceOptions) {
     this.storage = options.storage;
@@ -58,10 +60,17 @@ export class DashboardService {
 
   getManagedSessions() {
     const sessions = this.sessions.list();
-    const activeSessions = sessions.filter((session) => session.state === "working" || session.state === "waiting_approval");
+    const visibleSessions = sessions
+      .filter((session) =>
+        session.state === "working"
+        || session.state === "waiting_approval"
+        || session.state === "completed"
+      )
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      .slice(0, 12);
     return {
       generated_at: nowIso(),
-      items: activeSessions.map((session) => this.toSessionCard(session)),
+      items: visibleSessions.map((session) => this.toSessionCard(session)),
     };
   }
 
@@ -83,6 +92,7 @@ export class DashboardService {
   }
 
   getContinueWorking() {
+    this.refreshRecentWork();
     const sessions = this.sessions.list();
     const activeOrPaused = sessions
       .filter((session) => session.state === "working" || session.state === "waiting_approval")
@@ -94,8 +104,12 @@ export class DashboardService {
         agent_type: session.agent_type,
         state: session.state,
         project_path: session.project_path,
-        summary: this.summaries.getSessionCardSummary(session, this.summarizeSession(session)),
+        summary: this.summaries.getSessionCardSummary(
+          session,
+          this.pickManagedSessionSummary(session.id, this.pickLatestAgentOutput(session.id)) ?? this.summarizeSession(session),
+        ),
         next_action: session.state === "waiting_approval" ? "review_approval" : "open_session",
+        updated_at: session.updated_at,
       }));
     const recentRecords = this.recentWork.list();
 
@@ -109,6 +123,7 @@ export class DashboardService {
           this.summarizeRecentWorkTitle(record),
           this.summarizeRecentWorkForContinue(record),
         );
+        const takeover = this.findLinkedManagedTakeover(record.id);
         return {
           kind: "recent_work" as const,
           recent_work_id: record.id,
@@ -118,6 +133,10 @@ export class DashboardService {
           project_path: record.project_path,
           summary: summarized.summary,
           next_action: summarized.nextMove ?? "continue_recent_work",
+          updated_at: record.updated_at,
+          linked_managed_session_id: takeover?.session_id,
+          linked_managed_session_title: takeover?.session_title,
+          linked_managed_status: takeover?.status,
         };
       });
 
@@ -128,6 +147,7 @@ export class DashboardService {
   }
 
   getRecentWorkDetail(id: string) {
+    this.refreshRecentWork(true);
     const record = this.storage.getRecentWork(id);
     if (!record) {
       return undefined;
@@ -146,6 +166,7 @@ export class DashboardService {
     const fallbackTitle = this.summarizeRecentWorkTitle(record);
     const fallbackSummary = this.summarizeRecentWorkForContinue(record);
     const summarized = this.summaries.readContinueCard(record, fallbackTitle, fallbackSummary);
+    const takeover = this.findLinkedManagedTakeover(record.id);
 
     return {
       id: record.id,
@@ -160,12 +181,83 @@ export class DashboardService {
       raw_agent_response: rawAgentResponse,
       next_move: summarized.nextMove,
       changed_files: this.collectChangedFiles(record, rawAgentResponse),
+      takeover,
       updated_at: record.updated_at,
+    };
+  }
+
+  private refreshRecentWork(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastRecentWorkRefreshAt < 2000) {
+      return;
+    }
+
+    this.lastRecentWorkRefreshAt = now;
+    this.recentWork.scan();
+  }
+
+  getManagedSessionDetail(id: string) {
+    const session = this.sessions.getRecord(id);
+    if (!session) {
+      return undefined;
+    }
+
+    const task = session.task_id ? this.tasks.get(session.task_id) : undefined;
+    const linkedRecentWorkId = task ? this.linkedRecentWorkId(task) : undefined;
+    const linkedRecentWork = linkedRecentWorkId ? this.storage.getRecentWork(linkedRecentWorkId) : undefined;
+    const linkedMetadata = linkedRecentWork?.metadata ?? {};
+    const rawAgentResponse = this.pickLatestAgentOutput(session.id);
+    const rawUserInput = this.pickString(
+      this.pickOperatorInstruction(task, session),
+      linkedMetadata.raw_user_input,
+      linkedMetadata.last_user_message,
+    );
+    const continuation = this.findLinkedManagedContinuation(session.id);
+    const summary = this.summaries.getSessionCardSummary(
+      session,
+      this.pickManagedSessionSummary(session.id, rawAgentResponse) ?? this.summarizeSession(session),
+    );
+    const sourceObserved = linkedRecentWork
+      ? {
+          recent_work_id: linkedRecentWork.id,
+          title: this.summaries.readContinueCard(
+            linkedRecentWork,
+            this.summarizeRecentWorkTitle(linkedRecentWork),
+            this.summarizeRecentWorkForContinue(linkedRecentWork),
+          ).title,
+        }
+      : undefined;
+
+    return {
+      id: session.id,
+      title: session.title,
+      project_path: session.project_path,
+      project: this.projectName(session.project_path),
+      branch: session.branch,
+      agent_type: session.agent_type,
+      state: session.state,
+      is_working: session.state === "working" || session.state === "waiting_approval",
+      adapter: session.adapter,
+      summary,
+      raw_user_input: rawUserInput,
+      raw_agent_response: rawAgentResponse,
+      next_move: this.extractNextMove(rawAgentResponse ?? summary),
+      changed_files: this.collectSessionChangedFiles(session.id).length > 0
+        ? this.collectSessionChangedFiles(session.id)
+        : linkedRecentWork
+          ? this.collectChangedFiles(linkedRecentWork, rawAgentResponse)
+          : [],
+      live_progress: this.collectSessionLiveProgress(session.id),
+      source_observed: sourceObserved,
+      continuation,
+      updated_at: session.updated_at,
     };
   }
 
   private toSessionCard(session: SessionRecord) {
     const task = session.task_id ? this.tasks.get(session.task_id) : undefined;
+    const linkedRecentWorkId = task ? this.linkedRecentWorkId(task) : undefined;
+    const linkedRecentWork = linkedRecentWorkId ? this.storage.getRecentWork(linkedRecentWorkId) : undefined;
     return {
       session_id: session.id,
       task_id: session.task_id,
@@ -175,7 +267,10 @@ export class DashboardService {
       adapter: session.adapter,
       project_path: session.project_path,
       branch: session.branch,
-      summary: this.summaries.getSessionCardSummary(session, this.summarizeSession(session)),
+      summary: this.summaries.getSessionCardSummary(
+        session,
+        this.pickManagedSessionSummary(session.id, this.pickLatestAgentOutput(session.id)) ?? this.summarizeSession(session),
+      ),
       last_event: this.storage.listActivity({ session_id: session.id, limit: 1 })[0] ?? null,
       task_status: task?.status,
       terminal: {
@@ -183,6 +278,14 @@ export class DashboardService {
         transport: this.pickString(session.metadata?.terminal_transport) ?? "direct",
         size: session.metadata?.terminal_size ?? null,
       },
+      source_observed_id: linkedRecentWork?.id,
+      source_observed_title: linkedRecentWork
+        ? this.summaries.readContinueCard(
+          linkedRecentWork,
+          this.summarizeRecentWorkTitle(linkedRecentWork),
+          this.summarizeRecentWorkForContinue(linkedRecentWork),
+        ).title
+        : undefined,
       updated_at: session.updated_at,
     };
   }
@@ -327,6 +430,10 @@ export class DashboardService {
       return last.context;
     }
 
+    if (last.type === "agent_output") {
+      return last.message;
+    }
+
     if (last.type === "agent_thinking") {
       return last.summary;
     }
@@ -358,6 +465,86 @@ export class DashboardService {
     }
 
     return "Recent work is available to continue.";
+  }
+
+  private findLinkedManagedTakeover(recentWorkId: string) {
+    const candidates = this.tasks
+      .list()
+      .filter((task) => this.linkedRecentWorkId(task) === recentWorkId)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+
+    const task = candidates[0];
+    if (!task) {
+      return undefined;
+    }
+
+    const session = task.assigned_session_id ? this.sessions.getRecord(task.assigned_session_id) : undefined;
+    let status: "queued" | "starting" | "managed" | "waiting_approval" | "failed" | "completed";
+
+    if (task.status === "failed") {
+      status = "failed";
+    } else if (task.status === "completed") {
+      status = "completed";
+    } else if (task.status === "queued") {
+      status = "queued";
+    } else if (task.status === "running" && session?.state === "working") {
+      status = "managed";
+    } else if (task.status === "running") {
+      status = "starting";
+    } else if (task.status === "paused" && session?.state === "waiting_approval") {
+      status = "waiting_approval";
+    } else if (task.status === "paused" && session) {
+      status = "managed";
+    } else {
+      status = "queued";
+    }
+
+    return {
+      task_id: task.id,
+      status,
+      session_id: session?.id,
+      session_title: session?.title,
+    };
+  }
+
+  private findLinkedManagedContinuation(parentSessionId: string) {
+    const candidates = this.tasks
+      .list()
+      .filter((task) => task.context?.parent_session_id === parentSessionId)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+
+    const task = candidates[0];
+    if (!task) {
+      return undefined;
+    }
+
+    const session = task.assigned_session_id ? this.sessions.getRecord(task.assigned_session_id) : undefined;
+    let status: "queued" | "starting" | "managed" | "waiting_approval" | "failed" | "completed";
+
+    if (task.status === "failed") {
+      status = "failed";
+    } else if (task.status === "completed") {
+      status = "completed";
+    } else if (task.status === "queued") {
+      status = "queued";
+    } else if (task.status === "running" && session?.state === "working") {
+      status = "managed";
+    } else if (task.status === "running") {
+      status = "starting";
+    } else if (task.status === "paused" && session?.state === "waiting_approval") {
+      status = "waiting_approval";
+    } else if (task.status === "paused" && session) {
+      status = "managed";
+    } else {
+      status = "queued";
+    }
+
+    return {
+      task_id: task.id,
+      status,
+      session_id: session?.id,
+      session_title: session?.title,
+    };
   }
 
   private summarizeRecentWorkForContinue(record: RecentWorkRecord): string {
@@ -618,6 +805,215 @@ export class DashboardService {
 
   private pickString(value: unknown): string | undefined {
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  }
+
+  private pickLatestAgentOutput(sessionId: string): string | undefined {
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 25 });
+    for (const event of events) {
+      const payload = event.payload;
+      if (payload.type === "agent_output" && this.pickString(payload.message)) {
+        return payload.message.trim();
+      }
+      if (payload.type === "agent_thinking" && this.pickString(payload.summary)) {
+        return payload.summary.trim();
+      }
+      if (payload.type === "approval_requested" && this.pickString(payload.context)) {
+        return payload.context.trim();
+      }
+      if ((payload.type === "file_batch" || payload.type === "file_batch_intent") && this.pickString(payload.summary)) {
+        return payload.summary.trim();
+      }
+      if (payload.type === "error" && this.pickString(payload.message)) {
+        return payload.message.trim();
+      }
+    }
+
+    return this.pickLatestTerminalAgentOutput(sessionId);
+  }
+
+  private collectSessionLiveProgress(sessionId: string) {
+    const items = this.storage.listActivity({ session_id: sessionId, limit: 12 });
+    const mapped = items
+      .map((event) => {
+        const payload = event.payload;
+        if (payload.type === "agent_output" && this.pickString(payload.message)) {
+          return { id: String(event.id), summary: payload.message.trim(), at: event.created_at };
+        }
+        if (payload.type === "agent_thinking" && this.pickString(payload.summary)) {
+          return { id: String(event.id), summary: payload.summary.trim(), at: event.created_at };
+        }
+        if ((payload.type === "file_batch" || payload.type === "file_batch_intent") && this.pickString(payload.summary)) {
+          return { id: String(event.id), summary: payload.summary.trim(), at: event.created_at };
+        }
+        if ((payload.type === "command_intent" || payload.type === "command_run") && this.pickString(payload.cmd)) {
+          return { id: String(event.id), summary: `Command: ${payload.cmd.trim()}`, at: event.created_at };
+        }
+        if (payload.type === "approval_requested" && this.pickString(payload.context)) {
+          return { id: String(event.id), summary: payload.context.trim(), at: event.created_at };
+        }
+        if (payload.type === "error" && this.pickString(payload.message)) {
+          return { id: String(event.id), summary: payload.message.trim(), at: event.created_at };
+        }
+        return undefined;
+      })
+      .filter((item): item is { id: string; summary: string; at: string } => Boolean(item))
+      .slice(0, 6);
+
+    if (mapped.length > 0) {
+      return mapped;
+    }
+
+    return this.collectTerminalLiveProgress(sessionId);
+  }
+
+  private linkedRecentWorkId(task: TaskRecord): string | undefined {
+    return this.pickString(task.context?.source_recent_work_id) ?? this.pickString(task.context?.previous_session_id);
+  }
+
+  private pickManagedSessionSummary(sessionId: string, rawAgentResponse?: string): string | undefined {
+    const text = rawAgentResponse ?? this.collectSessionLiveProgress(sessionId)[0]?.summary;
+    if (!text) {
+      return undefined;
+    }
+
+    return this.deriveHeuristicSummary(text) ?? this.compactText(text, 240);
+  }
+
+  private extractNextMove(text: string | undefined): string | undefined {
+    if (!text) {
+      return undefined;
+    }
+
+    const patterns = [
+      /další logick(?:ý|e) krok[:\s-]+(.+)/i,
+      /další krok[:\s-]+(.+)/i,
+      /next (?:logical )?step[:\s-]+(.+)/i,
+      /next move[:\s-]+(.+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      const captured = match?.[1]?.trim();
+      if (captured) {
+        return this.compactText(captured, 160);
+      }
+    }
+
+    return undefined;
+  }
+
+  private pickOperatorInstruction(task: TaskRecord | undefined, session: SessionRecord): string | undefined {
+    const queuedMessages = Array.isArray(session.metadata?.queued_operator_messages)
+      ? session.metadata?.queued_operator_messages as Array<Record<string, unknown>>
+      : [];
+
+    const latestQueued = queuedMessages
+      .map((item) => this.pickString(item.message))
+      .find(Boolean);
+
+    if (latestQueued) {
+      return latestQueued;
+    }
+
+    return this.pickString(task?.description);
+  }
+
+  private collectSessionChangedFiles(sessionId: string): string[] {
+    const files = new Set<string>();
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 50 });
+
+    for (const event of events) {
+      const payload = event.payload;
+      if (payload.type === "file_batch" || payload.type === "file_batch_intent") {
+        for (const file of payload.files) {
+          if (this.pickString(file.path)) {
+            files.add(file.path.trim());
+          }
+        }
+      }
+    }
+
+    return Array.from(files);
+  }
+
+  private pickLatestTerminalAgentOutput(sessionId: string): string | undefined {
+    const chunks = this.storage.listTerminalEvents(sessionId, 200);
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      const chunk = chunks[index];
+      if (!chunk || chunk.stream !== "stdout") {
+        continue;
+      }
+
+      for (const line of chunk.chunk.split("\n").reverse()) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+
+        const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
+        if (!entry) {
+          continue;
+        }
+
+        const item = typeof entry.item === "object" && entry.item ? entry.item as Record<string, unknown> : undefined;
+        if (this.pickString(entry.type) === "item.completed" && this.pickString(item?.type) === "agent_message") {
+          const message = this.pickString(item?.text);
+          if (message) {
+            return message.trim();
+          }
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private collectTerminalLiveProgress(sessionId: string) {
+    const chunks = this.storage.listTerminalEvents(sessionId, 200);
+    const items: Array<{ id: string; summary: string; at: string }> = [];
+
+    for (const chunk of chunks) {
+      if (chunk.stream !== "stdout") {
+        continue;
+      }
+
+      for (const line of chunk.chunk.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+
+        const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
+        if (!entry) {
+          continue;
+        }
+
+        const entryType = this.pickString(entry.type);
+        const item = typeof entry.item === "object" && entry.item ? entry.item as Record<string, unknown> : undefined;
+        const itemType = this.pickString(item?.type);
+
+        if (entryType === "item.completed" && itemType === "agent_message") {
+          const message = this.pickString(item?.text);
+          if (message) {
+            items.push({ id: `${chunk.id}:agent`, summary: message.trim(), at: chunk.created_at });
+          }
+        } else if (entryType === "item.started" && itemType === "command_execution") {
+          const command = this.pickString(item?.command);
+          if (command) {
+            items.push({ id: `${chunk.id}:cmd-start`, summary: `Running command: ${command.trim()}`, at: chunk.created_at });
+          }
+        } else if (entryType === "item.completed" && itemType === "command_execution") {
+          const command = this.pickString(item?.command);
+          if (command) {
+            items.push({ id: `${chunk.id}:cmd-done`, summary: `Command finished: ${command.trim()}`, at: chunk.created_at });
+          }
+        }
+      }
+    }
+
+    return items
+      .sort((a, b) => b.at.localeCompare(a.at))
+      .slice(0, 6);
   }
 
   private collectChangedFiles(record: RecentWorkRecord, rawAgentResponse?: string): string[] {

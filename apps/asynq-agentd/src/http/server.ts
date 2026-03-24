@@ -1,4 +1,6 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
+import { createServer as createHttpListener, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
+import { createServer as createHttpsListener, type Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
 import type { DaemonConfig } from "../domain.ts";
 import { AsynqAgentdStorage } from "../db/storage.ts";
@@ -169,6 +171,68 @@ function notFound(res: ServerResponse): void {
   sendJson(res, 404, { error: "Not found" });
 }
 
+function pickString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function pickResumeSessionId(session: ReturnType<SessionService["getRecord"]>, task: ReturnType<TaskService["get"]>) {
+  if (!session) {
+    return undefined;
+  }
+
+  return pickString(
+    session.metadata?.codex_session_id,
+    session.metadata?.claude_session_id,
+    session.metadata?.codex_resume_session_id,
+    session.metadata?.claude_resume_session_id,
+    task?.context?.previous_session_id,
+  );
+}
+
+function buildContinuationDescription(
+  session: ReturnType<SessionService["getRecord"]>,
+  message?: string,
+  sourceRecentWork?: {
+    title: string;
+    summary?: string;
+    updated_at?: string;
+  },
+) {
+  const parts = ["Continue the managed session from its latest completed state."];
+
+  if (sourceRecentWork?.title) {
+    parts.push(`Observed upstream: ${sourceRecentWork.title}.`);
+  }
+
+  if (sourceRecentWork?.summary) {
+    parts.push(`Latest observed summary: ${sourceRecentWork.summary}`);
+  }
+
+  if (sourceRecentWork?.updated_at) {
+    parts.push(`Observed last active at: ${sourceRecentWork.updated_at}.`);
+  }
+
+  const instruction = message?.trim();
+  if (instruction) {
+    parts.push(`Operator instruction: ${instruction}`);
+  }
+
+  if (!instruction) {
+    parts.push("Keep making progress.");
+  }
+
+  return parts.join(" ");
+}
+
 export function parseTerminalControlMessage(payload: string): TerminalControlMessage {
   const parsed = JSON.parse(payload) as Record<string, unknown>;
   if (parsed.type === "send_message" && typeof parsed.message === "string" && parsed.message.trim()) {
@@ -206,8 +270,14 @@ export function parseTerminalControlMessage(payload: string): TerminalControlMes
   throw new Error("Unsupported terminal control message");
 }
 
-export function createHttpServer(services: AppServices) {
-  const server = createServer(async (req, res) => {
+type TlsServerOptions = {
+  enabled: boolean;
+  certPath?: string;
+  keyPath?: string;
+};
+
+export function createDaemonServer(services: AppServices, tls: TlsServerOptions): HttpServer | HttpsServer {
+  const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       notFound(res);
       return;
@@ -275,6 +345,17 @@ export function createHttpServer(services: AppServices) {
         return;
       }
 
+      const managedSessionMatch = path.match(/^\/managed-sessions\/([^/]+)$/);
+      if (method === "GET" && managedSessionMatch) {
+        const detail = services.dashboard.getManagedSessionDetail(managedSessionMatch[1]);
+        if (!detail) {
+          sendNotFound();
+          return;
+        }
+        send(200, detail);
+        return;
+      }
+
       if (method === "GET" && path === "/stream/events") {
         beginSse(res);
         const unsubscribe = services.liveEvents.subscribe((event) => {
@@ -317,8 +398,58 @@ export function createHttpServer(services: AppServices) {
       const sessionMessageMatch = path.match(/^\/sessions\/([^/]+)\/message$/);
       if (method === "POST" && sessionMessageMatch) {
         const body = await readBody<{ message?: string }>();
-        services.sessions.sendMessage(sessionMessageMatch[1], body.message ?? "");
-        send(202, { ok: true });
+        const session = services.sessions.getRecord(sessionMessageMatch[1]);
+        if (!session) {
+          sendNotFound();
+          return;
+        }
+
+        if (session.state === "working" || session.state === "waiting_approval") {
+          services.sessions.sendMessage(session.id, body.message ?? "");
+          send(202, { ok: true, mode: "live" });
+          return;
+        }
+
+        const task = session.task_id ? services.tasks.get(session.task_id) : undefined;
+        const sourceRecentWorkId = pickString(
+          task?.context?.source_recent_work_id,
+          task?.context?.previous_session_id,
+        );
+        const sourceRecentWork = sourceRecentWorkId ? services.recentWork.get(sourceRecentWorkId) : undefined;
+        const continuation = services.tasks.create({
+          title: session.title,
+          description: buildContinuationDescription(
+            session,
+            body.message,
+            sourceRecentWork
+              ? {
+                  title: sourceRecentWork.title,
+                  summary: sourceRecentWork.summary,
+                  updated_at: sourceRecentWork.updated_at,
+                }
+              : undefined,
+          ),
+          agent_type: session.agent_type,
+          project_path: session.project_path,
+          branch: session.branch,
+          priority: task?.priority,
+          approval_required: task?.approval_required,
+          model_preference: task?.model_preference,
+          context: {
+            previous_session_id: pickResumeSessionId(session, task),
+            parent_session_id: session.id,
+            source_recent_work_id: sourceRecentWork?.id ?? task?.context?.source_recent_work_id,
+            source_recent_work_updated_at: sourceRecentWork?.updated_at ?? task?.context?.source_recent_work_updated_at,
+            files_to_focus: task?.context?.files_to_focus,
+            test_command: task?.context?.test_command,
+          },
+        });
+        void services.scheduler.tick();
+        send(202, {
+          ok: true,
+          mode: "continued",
+          task_id: continuation.id,
+        });
         return;
       }
 
@@ -454,7 +585,14 @@ export function createHttpServer(services: AppServices) {
         error: error instanceof Error ? error.message : "Unknown server error",
       });
     }
-  });
+  };
+
+  const server = tls.enabled
+    ? createHttpsListener({
+        cert: readFileSync(tls.certPath!, "utf8"),
+        key: readFileSync(tls.keyPath!, "utf8"),
+      }, requestHandler)
+    : createHttpListener(requestHandler);
 
   server.on("upgrade", (req, socket, head) => {
     handleWebSocketUpgrade(server, services, req, socket, head);
@@ -464,7 +602,7 @@ export function createHttpServer(services: AppServices) {
 }
 
 function handleWebSocketUpgrade(
-  _server: Server,
+  _server: HttpServer | HttpsServer,
   services: AppServices,
   req: IncomingMessage,
   socket: Socket,

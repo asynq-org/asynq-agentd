@@ -262,6 +262,68 @@ async function toggleDebug(args: string[]): Promise<void> {
   });
 }
 
+async function configureTls(args: string[]): Promise<void> {
+  const action = args[0];
+  if (!action || !["status", "enable", "disable"].includes(action)) {
+    throw new Error("Usage: tls <status|enable|disable> [--cert <path>] [--key <path>]");
+  }
+
+  if (action === "status") {
+    const config = await request("/config");
+    print({
+      endpoint: baseUrl,
+      public_url: publicUrl,
+      tls: {
+        enabled: Boolean(config?.tls?.enabled),
+        cert_path: config?.tls?.cert_path ?? null,
+        key_path: config?.tls?.key_path ?? null,
+      },
+    });
+    return;
+  }
+
+  if (action === "disable") {
+    const updated = await request("/config", {
+      method: "PATCH",
+      body: JSON.stringify({
+        tls: {
+          enabled: false,
+        },
+      }),
+    });
+
+    print({
+      ok: true,
+      tls: updated?.tls ?? { enabled: false },
+      restart_required: true,
+    });
+    return;
+  }
+
+  const certPath = getFlag(args, "--cert");
+  const keyPath = getFlag(args, "--key");
+  if (!certPath || !keyPath) {
+    throw new Error("Usage: tls enable --cert <path> --key <path>");
+  }
+
+  const updated = await request("/config", {
+    method: "PATCH",
+    body: JSON.stringify({
+      tls: {
+        enabled: true,
+        cert_path: certPath,
+        key_path: keyPath,
+      },
+    }),
+  });
+
+  print({
+    ok: true,
+    tls: updated?.tls,
+    restart_required: true,
+  });
+}
+
 async function printApprovals(args: string[]): Promise<void> {
   const status = getFlag(args, "--status") ?? "pending";
   print(await request(`/approvals?status=${encodeURIComponent(status)}`));
@@ -551,6 +613,9 @@ async function main(): Promise<void> {
     case "debug":
       await toggleDebug(args);
       return;
+    case "tls":
+      await configureTls(args);
+      return;
     case "logs":
       await printLogs(args);
       return;
@@ -619,7 +684,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing, start, stop, restart");
+      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing, debug, tls, logs, start, stop, restart");
       process.exitCode = 1;
   }
 }

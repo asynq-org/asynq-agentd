@@ -8,6 +8,8 @@ export interface RuntimePaths {
   dbPath: string;
   authPath: string;
   logPath: string;
+  tlsCertPath: string;
+  tlsKeyPath: string;
   claudePath: string;
   codexPath: string;
 }
@@ -22,6 +24,8 @@ export function resolveRuntimePaths(cwd: string): RuntimePaths {
     dbPath: resolve(root, "asynq-agentd.sqlite"),
     authPath: resolve(root, "auth.json"),
     logPath: resolve(root, "asynq-agentd.log"),
+    tlsCertPath: resolve(root, "tls", "cert.pem"),
+    tlsKeyPath: resolve(root, "tls", "key.pem"),
     claudePath: process.env.CLAUDE_HOME ? resolve(process.env.CLAUDE_HOME) : resolve(process.env.HOME ?? "~", ".claude"),
     codexPath: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME) : resolve(process.env.HOME ?? "~", ".codex"),
   };
@@ -31,6 +35,9 @@ export function createDefaultConfig(): DaemonConfig {
   return {
     auth_token: createHash("sha256").update(randomBytes(32)).digest("hex"),
     max_parallel_sessions: 3,
+    tls: {
+      enabled: false,
+    },
     approval: {
       always_require: ["git push", "rm -rf", "deploy"],
       never_require: ["npm test", "npm run lint", "git add", "git commit"],

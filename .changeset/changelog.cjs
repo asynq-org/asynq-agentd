@@ -2,9 +2,8 @@ function formatSummary(summary) {
   return summary
     .trim()
     .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ");
+    .map((line) => line.trimEnd())
+    .join("\n");
 }
 
 async function getReleaseLine(changeset, _type, _options) {
@@ -13,7 +12,13 @@ async function getReleaseLine(changeset, _type, _options) {
     return "";
   }
 
-  return `- ${summary}`;
+  const lines = summary.split("\n");
+  const [first, ...rest] = lines;
+  if (rest.length === 0) {
+    return `- ${first.trim()}`;
+  }
+
+  return [`- ${first.trim()}`, ...rest.map((line) => (line ? `  ${line}` : ""))].join("\n");
 }
 
 async function getDependencyReleaseLine(_changesets, dependenciesUpdated, _options) {

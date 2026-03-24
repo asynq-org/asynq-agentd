@@ -201,7 +201,8 @@ export class RecentWorkService {
       project_path: record.project_path,
       agent_type: record.source_type.startsWith("codex") ? "codex" : "claude-code",
       context: {
-        previous_session_id: record.id,
+        source_recent_work_id: record.id,
+        source_recent_work_updated_at: record.updated_at,
         files_to_focus: inferredFocusFiles,
       },
     });
@@ -857,6 +858,9 @@ export class RecentWorkService {
       const entryType = this.pickString(entry.type);
       const nestedPayload = this.getNestedCodexPayload(entry);
       const nestedType = this.pickString(nestedPayload?.type);
+      const messageRole = this.pickString(nestedPayload?.role);
+      const isUserMessage = entryType === "user_message" || nestedType === "user_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "user");
+      const isAgentMessage = entryType === "agent_message" || nestedType === "agent_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "assistant");
 
       if (entryType === "session_meta" && typeof entry.payload === "object" && entry.payload) {
         const payload = entry.payload as Record<string, unknown>;
@@ -864,12 +868,12 @@ export class RecentWorkService {
         cwd = this.pickString(payload.cwd) ?? cwd;
       }
 
-      if (!title && (entryType === "user_message" || nestedType === "user_message")) {
-        const message = this.extractMessageText(entryType === "user_message" ? entry.payload : nestedPayload);
+      if (!title && isUserMessage) {
+        const message = this.extractMessageText(isUserMessage && entryType === "user_message" ? entry.payload : nestedPayload);
         title = message ?? title;
       }
 
-      if (entryType === "user_message" || nestedType === "user_message") {
+      if (isUserMessage) {
         const message = this.extractMessageText(entryType === "user_message" ? entry.payload : nestedPayload);
         if (message) {
           lastUserMessage = message;
@@ -891,7 +895,7 @@ export class RecentWorkService {
         lastTaskStartedIndex = lineIndex;
       }
 
-      if (entryType === "agent_message" || nestedType === "agent_message") {
+      if (isAgentMessage) {
         const message = this.extractMessageText(entryType === "agent_message" ? entry.payload : nestedPayload);
         if (message) {
           lastAgentMessage = message;
@@ -994,7 +998,7 @@ export class RecentWorkService {
           }
 
           const contentItem = item as Record<string, unknown>;
-          return this.pickString(contentItem.text);
+          return this.pickString(contentItem.text, contentItem.output_text);
         })
         .filter((value): value is string => Boolean(value));
 
@@ -1331,6 +1335,9 @@ export class RecentWorkService {
     const entryType = this.pickString(entry.type);
     const nestedPayload = this.getNestedCodexPayload(entry);
     const nestedType = this.pickString(nestedPayload?.type);
+    const messageRole = this.pickString(nestedPayload?.role);
+    const isUserMessage = entryType === "user_message" || nestedType === "user_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "user");
+    const isAgentMessage = entryType === "agent_message" || nestedType === "agent_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "assistant");
 
     if (entryType === "session_meta") {
       return [{
@@ -1356,7 +1363,7 @@ export class RecentWorkService {
       }];
     }
 
-    if (entryType === "user_message" || nestedType === "user_message") {
+    if (isUserMessage) {
       const message = this.extractMessageText(entryType === "user_message" ? entry.payload : nestedPayload);
       return message
         ? [{
@@ -1366,7 +1373,7 @@ export class RecentWorkService {
         : [];
     }
 
-    if (entryType === "agent_message" || nestedType === "agent_message") {
+    if (isAgentMessage) {
       const message = this.extractMessageText(entryType === "agent_message" ? entry.payload : nestedPayload);
       return message
         ? [{
@@ -1434,6 +1441,10 @@ export class RecentWorkService {
   private getNestedCodexPayload(entry: Record<string, unknown>): Record<string, unknown> | undefined {
     if (typeof entry.payload === "object" && entry.payload) {
       return entry.payload as Record<string, unknown>;
+    }
+
+    if (typeof entry.item === "object" && entry.item) {
+      return entry.item as Record<string, unknown>;
     }
 
     return undefined;
