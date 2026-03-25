@@ -14,6 +14,7 @@ export interface TaskContext {
   parent_session_id?: string;
   source_recent_work_id?: string;
   source_recent_work_updated_at?: string;
+  source_codex_session_id?: string;
   files_to_focus?: string[];
   test_command?: string;
 }

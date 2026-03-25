@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync, watch } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { createHash } from "node:crypto";
 import type { ActivityPayload, ActivityRecord, RecentWorkListItem, RecentWorkRecord } from "../domain.ts";
@@ -10,6 +10,9 @@ import type { EventStreamService } from "./event-stream-service.ts";
 
 const INDEXABLE_EXTENSIONS = new Set([".json", ".jsonl", ".md", ".txt"]);
 const IGNORED_FILE_NAMES = new Set(["settings.json"]);
+const MAX_FULL_CODEX_SESSION_BYTES = 4 * 1024 * 1024;
+const CODEX_SESSION_HEAD_BYTES = 256 * 1024;
+const CODEX_SESSION_TAIL_BYTES = 1024 * 1024;
 
 interface ClaudeSessionMeta {
   pid: number;
@@ -192,7 +195,6 @@ export class RecentWorkService {
 
     const contextSummary = this.buildContinuationSummary(record);
     const inferredFocusFiles = this.inferFocusFiles(record);
-
     return this.tasks.create({
       title: instruction ? `Continue: ${record.title}` : record.title,
       description: instruction
@@ -203,6 +205,7 @@ export class RecentWorkService {
       context: {
         source_recent_work_id: record.id,
         source_recent_work_updated_at: record.updated_at,
+        source_codex_session_id: record.source_type.startsWith("codex") ? record.id : undefined,
         files_to_focus: inferredFocusFiles,
       },
     });
@@ -830,7 +833,7 @@ export class RecentWorkService {
 
   private parseCodexSessionFile(filePath: string): RecentWorkRecord | undefined {
     const stats = statSync(filePath);
-    const lines = readFileSync(filePath, "utf8").split("\n").filter(Boolean);
+    const lines = this.readCodexSessionLines(filePath, stats.size);
     if (lines.length === 0) {
       return undefined;
     }
@@ -848,6 +851,7 @@ export class RecentWorkService {
     let userMessageCount = 0;
     let agentMessageCount = 0;
     let totalTokens: number | undefined;
+    let lastObservedTimestamp: string | undefined;
     let lastTaskStartedIndex = -1;
     let lastTaskCompletedIndex = -1;
     let lastContentIndex = -1;
@@ -859,8 +863,13 @@ export class RecentWorkService {
       const nestedPayload = this.getNestedCodexPayload(entry);
       const nestedType = this.pickString(nestedPayload?.type);
       const messageRole = this.pickString(nestedPayload?.role);
+      const entryTimestamp = this.extractObservedTimestamp(entry);
       const isUserMessage = entryType === "user_message" || nestedType === "user_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "user");
       const isAgentMessage = entryType === "agent_message" || nestedType === "agent_message" || (entryType === "response_item" && nestedType === "message" && messageRole === "assistant");
+
+      if (entryTimestamp && (!lastObservedTimestamp || entryTimestamp > lastObservedTimestamp)) {
+        lastObservedTimestamp = entryTimestamp;
+      }
 
       if (entryType === "session_meta" && typeof entry.payload === "object" && entry.payload) {
         const payload = entry.payload as Record<string, unknown>;
@@ -961,7 +970,7 @@ export class RecentWorkService {
       summary: summary ?? lastReasoningSummary ?? lastUserMessage,
       source_type: "codex-session-file",
       status,
-      updated_at: stats.mtime.toISOString(),
+      updated_at: lastObservedTimestamp ?? stats.mtime.toISOString(),
       metadata: {
         lines: lines.length,
         raw_user_input: lastUserMessage,
@@ -977,6 +986,50 @@ export class RecentWorkService {
         total_tokens: totalTokens,
       },
     };
+  }
+
+  private readCodexSessionLines(filePath: string, sizeBytes: number): string[] {
+    if (sizeBytes <= MAX_FULL_CODEX_SESSION_BYTES) {
+      return readFileSync(filePath, "utf8").split("\n").filter(Boolean);
+    }
+
+    const fd = openSync(filePath, "r");
+    try {
+      const headBytes = Math.min(sizeBytes, CODEX_SESSION_HEAD_BYTES);
+      const tailBytes = Math.min(sizeBytes, CODEX_SESSION_TAIL_BYTES);
+      const head = this.readUtf8Slice(fd, 0, headBytes);
+      const tailStart = Math.max(0, sizeBytes - tailBytes);
+      const tail = tailStart > 0 ? this.readUtf8Slice(fd, tailStart, tailBytes) : "";
+
+      const headLines = head.split("\n").filter(Boolean);
+      const tailLines = tail.split("\n").filter(Boolean);
+      const merged = tailStart > 0
+        ? [...headLines, ...tailLines]
+        : headLines;
+
+      return merged;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private readUtf8Slice(fd: number, position: number, length: number): string {
+    if (length <= 0) {
+      return "";
+    }
+
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = readSync(fd, buffer, 0, length, position);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  }
+
+  private extractObservedTimestamp(entry: Record<string, unknown>): string | undefined {
+    const timestamp = this.pickString(entry.timestamp);
+    if (!timestamp) {
+      return undefined;
+    }
+
+    return Number.isNaN(Date.parse(timestamp)) ? undefined : timestamp;
   }
 
   private extractMessageText(payload: unknown): string | undefined {

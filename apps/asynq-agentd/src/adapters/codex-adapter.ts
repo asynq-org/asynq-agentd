@@ -54,15 +54,7 @@ export class CodexCliAdapter implements AgentAdapter {
     });
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(spawnPlan.command, spawnPlan.args, {
-        cwd: task.project_path,
-        env: {
-          ...process.env,
-          ...this.env,
-          CODEX_HOME: this.codexHome,
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      const child = this.spawnCodexProcess(spawnPlan.command, spawnPlan.args, task.project_path);
 
       this.processes.set(session.id, child);
       hooks.onSessionPatch({
@@ -149,6 +141,46 @@ export class CodexCliAdapter implements AgentAdapter {
     });
   }
 
+  async appendToConversation(
+    conversationId: string,
+    prompt: string,
+    options?: {
+      projectPath?: string;
+      modelPreference?: string;
+    },
+  ): Promise<void> {
+    const commandArgs = [
+      ...this.binArgs,
+      ...this.buildResumeArgs(prompt, conversationId, options?.modelPreference),
+    ];
+    const spawnPlan = createTerminalSpawnPlan(this.binPath, commandArgs);
+
+    await new Promise<void>((resolve, reject) => {
+      const child = this.spawnCodexProcess(
+        spawnPlan.command,
+        spawnPlan.args,
+        options?.projectPath ?? process.cwd(),
+      );
+      const stderrChunks: string[] = [];
+
+      child.stdout.on("data", () => {});
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        stderrChunks.push(chunk);
+      });
+
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        reject(new Error(stderrChunks.join("").trim() || `Codex relay exited with code ${code ?? "unknown"}`));
+      });
+    });
+  }
+
   stopSession(sessionId: string): void {
     const child = this.processes.get(sessionId);
     if (!child) {
@@ -175,15 +207,7 @@ export class CodexCliAdapter implements AgentAdapter {
   private buildCodexArgs(task: TaskRecord, prompt: string, resumeSessionId?: string): string[] {
     const model = task.model_preference?.trim();
     if (resumeSessionId) {
-      return [
-        "exec",
-        "resume",
-        "--json",
-        "--skip-git-repo-check",
-        ...(model ? ["-m", model] : []),
-        resumeSessionId,
-        prompt,
-      ];
+      return this.buildResumeArgs(prompt, resumeSessionId, model);
     }
 
     return [
@@ -196,6 +220,34 @@ export class CodexCliAdapter implements AgentAdapter {
       ...(model ? ["-m", model] : []),
       prompt,
     ];
+  }
+
+  private buildResumeArgs(prompt: string, resumeSessionId: string, model?: string): string[] {
+    return [
+      "exec",
+      "resume",
+      "--json",
+      "--skip-git-repo-check",
+      ...(model ? ["-m", model] : []),
+      resumeSessionId,
+      prompt,
+    ];
+  }
+
+  private spawnCodexProcess(
+    command: string,
+    args: string[],
+    cwd: string,
+  ): ChildProcessWithoutNullStreams {
+    return spawn(command, args, {
+      cwd,
+      env: {
+        ...process.env,
+        ...this.env,
+        CODEX_HOME: this.codexHome,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   }
 
   private pickResumeSessionId(task: TaskRecord, session: SessionRecord): string | undefined {

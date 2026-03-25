@@ -198,6 +198,19 @@ function pickResumeSessionId(session: ReturnType<SessionService["getRecord"]>, t
   );
 }
 
+export function pickSourceCodexSessionId(
+  task: ReturnType<TaskService["get"]>,
+  sourceRecentWork?: {
+    id: string;
+    source_type: string;
+  },
+) {
+  return pickString(
+    task?.context?.source_codex_session_id,
+    sourceRecentWork?.source_type.startsWith("codex") ? sourceRecentWork.id : undefined,
+  );
+}
+
 function buildContinuationDescription(
   session: ReturnType<SessionService["getRecord"]>,
   message?: string,
@@ -440,6 +453,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
             parent_session_id: session.id,
             source_recent_work_id: sourceRecentWork?.id ?? task?.context?.source_recent_work_id,
             source_recent_work_updated_at: sourceRecentWork?.updated_at ?? task?.context?.source_recent_work_updated_at,
+            source_codex_session_id: pickSourceCodexSessionId(task, sourceRecentWork),
             files_to_focus: task?.context?.files_to_focus,
             test_command: task?.context?.test_command,
           },

@@ -9,6 +9,14 @@ export interface AdapterHooks {
 export interface AgentAdapter {
   readonly name: string;
   runTask(task: TaskRecord, session: SessionRecord, hooks: AdapterHooks): Promise<void>;
+  appendToConversation?(
+    conversationId: string,
+    prompt: string,
+    options?: {
+      projectPath?: string;
+      modelPreference?: string;
+    },
+  ): Promise<void>;
   canResumeTask?(task: TaskRecord, session: SessionRecord): boolean;
   writeTerminalInput?(sessionId: string, input: string): void;
   resizeTerminal?(sessionId: string, cols: number, rows: number): void;

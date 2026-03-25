@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseTerminalControlMessage } from "./server.ts";
+import { parseTerminalControlMessage, pickSourceCodexSessionId } from "./server.ts";
 
 test("parseTerminalControlMessage accepts send_message payloads", () => {
   assert.deepEqual(
@@ -60,5 +60,39 @@ test("parseTerminalControlMessage rejects unsupported payloads", () => {
       type: "unknown",
     })),
     /Unsupported terminal control message/,
+  );
+});
+
+test("pickSourceCodexSessionId falls back to the observed Codex recent-work id", () => {
+  assert.equal(
+    pickSourceCodexSessionId(
+      {
+        context: {
+          source_recent_work_id: "ignored",
+        },
+      } as never,
+      {
+        id: "019d2180-9a38-79c3-bd7c-d602b0277379",
+        source_type: "codex-session-file",
+      },
+    ),
+    "019d2180-9a38-79c3-bd7c-d602b0277379",
+  );
+});
+
+test("pickSourceCodexSessionId preserves explicit task context when present", () => {
+  assert.equal(
+    pickSourceCodexSessionId(
+      {
+        context: {
+          source_codex_session_id: "explicit-session-id",
+        },
+      } as never,
+      {
+        id: "019d2180-9a38-79c3-bd7c-d602b0277379",
+        source_type: "codex-session-file",
+      },
+    ),
+    "explicit-session-id",
   );
 });

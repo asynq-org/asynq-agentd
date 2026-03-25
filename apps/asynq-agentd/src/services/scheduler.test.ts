@@ -54,6 +54,31 @@ class InterceptedApprovalAdapter implements AgentAdapter {
   }
 }
 
+class RelayRecordingCodexAdapter extends MockAgentAdapter {
+  relays: Array<{
+    conversationId: string;
+    prompt: string;
+    projectPath?: string;
+    modelPreference?: string;
+  }> = [];
+
+  override async appendToConversation(
+    conversationId: string,
+    prompt: string,
+    options?: {
+      projectPath?: string;
+      modelPreference?: string;
+    },
+  ): Promise<void> {
+    this.relays.push({
+      conversationId,
+      prompt,
+      projectPath: options?.projectPath,
+      modelPreference: options?.modelPreference,
+    });
+  }
+}
+
 class StaticProcessMonitor extends ProcessMonitorService {
   private readonly alive: boolean;
 
@@ -284,6 +309,103 @@ test("scheduler does not duplicate a running task if the persisted process is st
   assert.equal(tasks.get(task.id)?.status, "running");
   assert.equal(sessions.getRecord(session.id)?.state, "working");
   assert.equal(sessions.getRecord(session.id)?.metadata?.runtime_process_alive, true);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("scheduler relays managed Codex completion back to the source observed conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const config = new ConfigService(storage);
+  const codexAdapter = new RelayRecordingCodexAdapter();
+  const scheduler = new SchedulerService(
+    storage,
+    tasks,
+    sessions,
+    config,
+    new Map([
+      ["custom", new MockAgentAdapter()],
+      ["claude-code", new MockAgentAdapter()],
+      ["codex", codexAdapter],
+      ["opencode", new MockAgentAdapter()],
+    ]),
+  );
+
+  const task = tasks.create({
+    title: "Relay managed completion",
+    description: "Finish work and append a Buddy handoff note.",
+    project_path: "/tmp/project",
+    agent_type: "codex",
+    model_preference: "gpt-5.4",
+    context: {
+      source_recent_work_id: "codex-session-1",
+      source_codex_session_id: "codex-session-1",
+    },
+  });
+
+  await scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 140));
+
+  assert.equal(tasks.get(task.id)?.status, "completed");
+  assert.equal(codexAdapter.relays.length, 1);
+  assert.equal(codexAdapter.relays[0]?.conversationId, "codex-session-1");
+  assert.equal(codexAdapter.relays[0]?.projectPath, "/tmp/project");
+  assert.equal(codexAdapter.relays[0]?.modelPreference, "gpt-5.4");
+  assert.match(codexAdapter.relays[0]?.prompt ?? "", /Buddy managed handoff update/);
+  assert.match(codexAdapter.relays[0]?.prompt ?? "", /Status: completed/);
+  assert.match(codexAdapter.relays[0]?.prompt ?? "", /Changed files:/);
+
+  const session = sessions.list()[0];
+  assert.equal(typeof session?.metadata?.managed_handoff_relayed_at, "string");
+  assert.equal(session?.metadata?.managed_handoff_target_session_id, "codex-session-1");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("scheduler relays managed Codex completion for legacy tasks using source recent-work id", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const config = new ConfigService(storage);
+  const codexAdapter = new RelayRecordingCodexAdapter();
+  const scheduler = new SchedulerService(
+    storage,
+    tasks,
+    sessions,
+    config,
+    new Map([
+      ["custom", new MockAgentAdapter()],
+      ["claude-code", new MockAgentAdapter()],
+      ["codex", codexAdapter],
+      ["opencode", new MockAgentAdapter()],
+    ]),
+  );
+
+  const task = tasks.create({
+    title: "Relay managed completion for legacy task",
+    description: "Finish work and append a Buddy handoff note using the observed recent-work id.",
+    project_path: "/tmp/project",
+    agent_type: "codex",
+    context: {
+      source_recent_work_id: "codex-session-1",
+    },
+  });
+
+  await scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 140));
+
+  assert.equal(tasks.get(task.id)?.status, "completed");
+  assert.equal(codexAdapter.relays.length, 1);
+  assert.equal(codexAdapter.relays[0]?.conversationId, "codex-session-1");
+
+  const session = sessions.list()[0];
+  assert.equal(typeof session?.metadata?.managed_handoff_relayed_at, "string");
+  assert.equal(session?.metadata?.managed_handoff_target_session_id, "codex-session-1");
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

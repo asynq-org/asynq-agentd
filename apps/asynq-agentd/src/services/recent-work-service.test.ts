@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { AsynqAgentdStorage } from "../db/storage.ts";
@@ -43,6 +43,7 @@ test("recent work scan indexes claude-like files and continue creates a task", (
   assert.equal(task.agent_type, "claude-code");
   assert.equal(task.project_path, projectRoot);
   assert.equal(task.context?.source_recent_work_id, indexed[0]!.id);
+  assert.equal(task.context?.previous_session_id, undefined);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });
@@ -281,6 +282,7 @@ test("recent work scan parses real Claude session metadata and transcripts", () 
   const task = recentWork.continueRecentWork(sessionId, "Continue the auth work");
   assert.equal(task.agent_type, "claude-code");
   assert.equal(task.project_path, projectRoot);
+  assert.equal(task.context?.previous_session_id, undefined);
   assert.match(task.description, /Last user request: Fix the auth middleware/);
   assert.match(task.description, /Last assistant update: The auth middleware has been fixed/);
   assert.match(task.description, /Git branch: feature\/auth-fix/);
@@ -495,6 +497,11 @@ test("recent work scan indexes Codex session index and session files", () => {
     }),
     "",
   ].join("\n"));
+  utimesSync(
+    resolve(sessionsRoot, "rollout-2026-03-14-codex-session-1.jsonl"),
+    new Date("2026-03-14T10:30:00.000Z"),
+    new Date("2026-03-14T10:30:00.000Z"),
+  );
 
   const recentWork = new RecentWorkService(storage, tasks, {
     claudePath: resolve(root, ".claude-empty"),
@@ -507,6 +514,7 @@ test("recent work scan indexes Codex session index and session files", () => {
   assert.equal(codexRecord?.project_path, projectRoot);
   assert.equal(codexRecord?.status, "ended");
   assert.equal(codexRecord?.summary, "I found the session metadata and will wire it into recent-work.");
+  assert.equal(codexRecord?.updated_at, "2026-03-14T09:00:41.000Z");
   assert.equal(codexRecord?.metadata?.last_user_message, "Implement recent work parsing");
   assert.equal(codexRecord?.metadata?.last_agent_message, "I found the session metadata and will wire it into recent-work.");
   assert.equal(codexRecord?.metadata?.last_reasoning_summary, "Inspecting local Codex session files");
@@ -515,11 +523,13 @@ test("recent work scan indexes Codex session index and session files", () => {
 
   const task = recentWork.continueRecentWork("codex-session-1");
   assert.equal(task.agent_type, "codex");
+  assert.equal(task.context?.previous_session_id, undefined);
   assert.match(task.description, /Recent summary:/);
   assert.match(task.description, /Last user request: Implement recent work parsing/);
   assert.match(task.description, /Last agent update: I found the session metadata and will wire it into recent-work\./);
   assert.ok(task.context?.files_to_focus?.includes(projectRoot));
   assert.equal(task.context?.source_recent_work_id, "codex-session-1");
+  assert.equal(task.context?.source_codex_session_id, "codex-session-1");
 
   const activity = recentWork.listImportedActivity("codex-session-1");
   const rawActivity = recentWork.listImportedActivity("codex-session-1", undefined, false);
@@ -586,6 +596,77 @@ test("recent work scan indexes Codex session index and session files", () => {
   assert.ok(rawActivity.some((event) => event.payload.type === "file_create"));
   assert.ok(rawActivity.some((event) => event.payload.type === "file_delete"));
   assert.ok(!rawActivity.some((event) => event.payload.type === "file_batch"));
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan survives oversized Codex session files by sampling head and tail", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-large-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = resolve(root, ".codex");
+  const sessionsRoot = resolve(codexRoot, "sessions", "2026", "03", "24");
+  mkdirSync(sessionsRoot, { recursive: true });
+  const projectRoot = resolve(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+
+  const largeMiddle = `${"x".repeat(256)}\n`.repeat(20000);
+  writeFileSync(resolve(sessionsRoot, "rollout-2026-03-24-large-session.jsonl"), [
+    JSON.stringify({
+      timestamp: "2026-03-24T20:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: "large-session",
+        cwd: projectRoot,
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-24T20:00:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Investigate recent-work parser stability",
+      },
+    }),
+    largeMiddle,
+    JSON.stringify({
+      timestamp: "2026-03-24T20:10:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: ["Scanning only the important parts of a huge file"],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-24T20:10:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "Recent-work scan should not crash on oversized Codex transcripts.",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-24T20:10:02.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+      },
+    }),
+    "",
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "large-session");
+
+  assert.ok(record);
+  assert.equal(record?.project_path, projectRoot);
+  assert.equal(record?.summary, "Recent-work scan should not crash on oversized Codex transcripts.");
+  assert.equal(record?.status, "ended");
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

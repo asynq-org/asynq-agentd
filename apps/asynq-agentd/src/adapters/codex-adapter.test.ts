@@ -209,6 +209,51 @@ writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.sl
   rmSync(root, { recursive: true, force: true });
 });
 
+test("codex adapter can append a short relay update into an existing conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-codex-"));
+  const projectRoot = resolve(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const argvFile = resolve(root, "argv.json");
+  const scriptPath = resolve(root, "fake-codex-relay.mjs");
+
+  writeFileSync(scriptPath, `
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.slice(2), null, 2));
+`, "utf8");
+
+  const adapter = new CodexCliAdapter({
+    binPath: process.execPath,
+    binArgs: [scriptPath],
+    codexHome: resolve(root, ".codex"),
+    env: {
+      ASYNQ_AGENTD_ARGV_FILE: argvFile,
+    },
+  });
+
+  await adapter.appendToConversation(
+    "019cda49-9e87-7a13-a4e8-7dddb62a9d99",
+    "Buddy managed handoff update",
+    {
+      projectPath: projectRoot,
+      modelPreference: "gpt-5.4",
+    },
+  );
+
+  const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+  assert.deepEqual(argv.slice(0, 7), [
+    "exec",
+    "resume",
+    "--json",
+    "--skip-git-repo-check",
+    "-m",
+    "gpt-5.4",
+    "019cda49-9e87-7a13-a4e8-7dddb62a9d99",
+  ]);
+  assert.equal(argv[7], "Buddy managed handoff update");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("codex adapter accepts live terminal input", async () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-codex-"));
   const projectRoot = resolve(root, "project");

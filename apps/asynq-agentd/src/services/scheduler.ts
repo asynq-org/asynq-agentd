@@ -17,6 +17,21 @@ const PRIORITY_SCORE: Record<TaskRecord["priority"], number> = {
   urgent: 4,
 };
 
+function pickString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+
+  return undefined;
+}
+
 export class SchedulerService {
   private timer?: NodeJS.Timeout;
   private runningSessions = new Set<string>();
@@ -314,6 +329,7 @@ export class SchedulerService {
           last_run_at: nowIso(),
         });
       }
+      await this.relayManagedHandoff(task.id, session.id, "completed");
     } catch (error) {
       this.sessions.recordEvent(session.id, {
         type: "error",
@@ -325,9 +341,143 @@ export class SchedulerService {
         status: "failed",
         assigned_session_id: session.id,
       });
+      await this.relayManagedHandoff(task.id, session.id, "failed");
     } finally {
       this.sessions.unregisterControl(session.id);
       this.runningSessions.delete(task.id);
     }
+  }
+
+  private async relayManagedHandoff(
+    taskId: string,
+    sessionId: string,
+    outcome: "completed" | "failed",
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    const session = this.sessions.getRecord(sessionId);
+    const targetConversationId = pickString(
+      task?.context?.source_codex_session_id,
+      task?.agent_type === "codex" ? task?.context?.source_recent_work_id : undefined,
+    ) ?? "";
+    if (!task || !session || !targetConversationId) {
+      return;
+    }
+
+    if (typeof session.metadata?.managed_handoff_relayed_at === "string") {
+      return;
+    }
+
+    const codexAdapter = this.adapters.get("codex");
+    if (!codexAdapter?.appendToConversation) {
+      return;
+    }
+
+    const prompt = this.buildManagedHandoffPrompt(task, session, outcome);
+    this.sessions.recordEvent(sessionId, {
+      type: "agent_thinking",
+      summary: `Relaying managed handoff back to observed Codex thread ${targetConversationId}.`,
+    });
+
+    try {
+      await codexAdapter.appendToConversation(targetConversationId, prompt, {
+        projectPath: task.project_path,
+        modelPreference: task.model_preference,
+      });
+      this.sessions.mergeMetadata(sessionId, {
+        managed_handoff_relayed_at: nowIso(),
+        managed_handoff_target_session_id: targetConversationId,
+        managed_handoff_outcome: outcome,
+        managed_handoff_relay_error: undefined,
+      });
+      this.sessions.recordEvent(sessionId, {
+        type: "agent_thinking",
+        summary: "Managed handoff was appended to the observed Codex thread.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Managed handoff relay failed";
+      this.sessions.mergeMetadata(sessionId, {
+        managed_handoff_relay_error: message,
+        managed_handoff_target_session_id: targetConversationId,
+      });
+      this.sessions.recordEvent(sessionId, {
+        type: "error",
+        message: `Managed handoff relay failed: ${message}`,
+        recoverable: true,
+      });
+    }
+  }
+
+  private buildManagedHandoffPrompt(
+    task: TaskRecord,
+    session: SessionRecord,
+    outcome: "completed" | "failed",
+  ): string {
+    const summary = this.pickManagedHandoffSummary(session.id, outcome);
+    const changedFiles = this.collectManagedChangedFiles(session.id).slice(0, 6);
+    const changedFilesBlock = changedFiles.length > 0
+      ? `Changed files:\n${changedFiles.map((file) => `- ${file}`).join("\n")}`
+      : "Changed files:\n- None captured";
+
+    return [
+      "Buddy managed handoff update for the observed thread.",
+      "",
+      "Do not continue the prior task.",
+      "Do not inspect files.",
+      "Do not run commands.",
+      "Do not change code.",
+      "",
+      "Append a short status update for future context using only the information below.",
+      "",
+      `Managed session title: ${session.title}`,
+      `Status: ${outcome}`,
+      `Summary: ${summary}`,
+      changedFilesBlock,
+      "",
+      "Keep it under 120 words.",
+    ].join("\n");
+  }
+
+  private pickManagedHandoffSummary(sessionId: string, outcome: "completed" | "failed"): string {
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 30 });
+    for (const event of events) {
+      const payload = event.payload;
+      if (payload.type === "agent_output" && payload.message.trim()) {
+        return payload.message.trim();
+      }
+      if (payload.type === "agent_thinking" && payload.summary.trim()) {
+        return payload.summary.trim();
+      }
+      if ((payload.type === "file_batch" || payload.type === "file_batch_intent") && payload.summary.trim()) {
+        return payload.summary.trim();
+      }
+      if (payload.type === "error" && payload.message.trim()) {
+        return payload.message.trim();
+      }
+    }
+
+    return outcome === "completed"
+      ? `Managed session "${sessionId}" completed.`
+      : `Managed session "${sessionId}" failed.`;
+  }
+
+  private collectManagedChangedFiles(sessionId: string): string[] {
+    const files = new Set<string>();
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 50 });
+
+    for (const event of events) {
+      const payload = event.payload;
+      if (payload.type === "file_edit" || payload.type === "file_create" || payload.type === "file_delete") {
+        files.add(payload.path);
+        continue;
+      }
+
+      if (payload.type === "file_batch" || payload.type === "file_batch_intent") {
+        for (const file of payload.files) {
+          files.add(file.path);
+        }
+      }
+    }
+
+    return Array.from(files);
   }
 }
