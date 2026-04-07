@@ -84,3 +84,19 @@ test("approval policy flags dangerous command intents and file deletion intents"
   assert.ok(fileDecision);
   assert.match(fileDecision?.action ?? "", /upcoming file batch/i);
 });
+
+test("approval policy flags write-like commands targeting protected paths outside the workspace", () => {
+  const policy = new ApprovalPolicyService();
+  const config = createDefaultConfig();
+  const task = createTask();
+
+  const decision = policy.shouldRequireApproval({
+    type: "command_intent",
+    cmd: "cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+    source: "tool_call",
+  }, task, config);
+
+  assert.ok(decision);
+  assert.match(decision?.action ?? "", /protected write/i);
+  assert.match(decision?.context ?? "", /\.asynq-agentd/i);
+});

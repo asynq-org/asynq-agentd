@@ -277,6 +277,42 @@ export class AsynqAgentdStorage {
     return result.changes > 0;
   }
 
+  deleteSession(id: string): boolean {
+    const result = this.db.prepare(`
+      DELETE FROM sessions
+      WHERE id = ?
+    `).run(id);
+    return result.changes > 0;
+  }
+
+  deleteApprovalsForSession(sessionId: string): void {
+    this.db.prepare(`
+      DELETE FROM approvals
+      WHERE session_id = ?
+    `).run(sessionId);
+  }
+
+  deleteActivityForSession(sessionId: string): void {
+    this.db.prepare(`
+      DELETE FROM activity_events
+      WHERE session_id = ?
+    `).run(sessionId);
+  }
+
+  deleteTerminalEventsForSession(sessionId: string): void {
+    this.db.prepare(`
+      DELETE FROM terminal_events
+      WHERE session_id = ?
+    `).run(sessionId);
+  }
+
+  deleteSummaryCacheForSession(sessionId: string): void {
+    this.db.prepare(`
+      DELETE FROM summary_cache
+      WHERE session_id = ?
+    `).run(sessionId);
+  }
+
   listApprovals(status?: ApprovalRecord["status"]): ApprovalRecord[] {
     const rows = status
       ? (this.db.prepare(`

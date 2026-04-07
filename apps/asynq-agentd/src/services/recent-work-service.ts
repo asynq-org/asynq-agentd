@@ -1,7 +1,14 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
-import type { ActivityPayload, ActivityRecord, RecentWorkListItem, RecentWorkRecord } from "../domain.ts";
+import type {
+  ActivityPayload,
+  ActivityRecord,
+  ObservedTakeoverContext,
+  RecentWorkListItem,
+  RecentWorkRecord,
+  TakeoverSuccessCheck,
+} from "../domain.ts";
 import { nowIso } from "../utils/time.ts";
 import { parseJsonSafe } from "../utils/json.ts";
 import type { AsynqAgentdStorage } from "../db/storage.ts";
@@ -50,6 +57,7 @@ interface RecentWorkServiceOptions {
 interface PendingCodexCommand {
   cmd: string;
   sideEffects: ActivityPayload[];
+  approvalRequest?: Extract<ActivityPayload, { type: "approval_requested" }>;
 }
 
 export class RecentWorkService {
@@ -195,6 +203,7 @@ export class RecentWorkService {
 
     const contextSummary = this.buildContinuationSummary(record);
     const inferredFocusFiles = this.inferFocusFiles(record);
+    const observedTakeover = this.pickObservedTakeover(record);
     return this.tasks.create({
       title: instruction ? `Continue: ${record.title}` : record.title,
       description: instruction
@@ -206,6 +215,7 @@ export class RecentWorkService {
         source_recent_work_id: record.id,
         source_recent_work_updated_at: record.updated_at,
         source_codex_session_id: record.source_type.startsWith("codex") ? record.id : undefined,
+        observed_takeover: observedTakeover,
         files_to_focus: inferredFocusFiles,
       },
     });
@@ -855,6 +865,8 @@ export class RecentWorkService {
     let lastTaskStartedIndex = -1;
     let lastTaskCompletedIndex = -1;
     let lastContentIndex = -1;
+    let inManagedHandoffTurn = false;
+    const pendingApprovalRequests = new Map<string, { action: string; context: string; cmd?: string; detected_at?: string }>();
     const filesModified = new Set<string>();
 
     for (const [lineIndex, line] of lines.entries()) {
@@ -877,13 +889,39 @@ export class RecentWorkService {
         cwd = this.pickString(payload.cwd) ?? cwd;
       }
 
+      if (entryType === "response_item" && (nestedType === "function_call" || nestedType === "custom_tool_call") && nestedPayload) {
+        const callId = this.pickString(nestedPayload.call_id);
+        const approvalRequest = this.extractCodexApprovalRequest(nestedPayload);
+        if (callId && approvalRequest) {
+          pendingApprovalRequests.set(callId, {
+            ...approvalRequest,
+            detected_at: entryTimestamp ?? undefined,
+          });
+        }
+      }
+
+      if (entryType === "response_item" && (nestedType === "function_call_output" || nestedType === "custom_tool_call_output") && nestedPayload) {
+        const callId = this.pickString(nestedPayload.call_id);
+        if (callId) {
+          pendingApprovalRequests.delete(callId);
+        }
+      }
+
       if (!title && isUserMessage) {
         const message = this.extractMessageText(isUserMessage && entryType === "user_message" ? entry.payload : nestedPayload);
-        title = message ?? title;
+        if (message && !this.isManagedHandoffRelayPrompt(message)) {
+          title = message;
+        }
       }
 
       if (isUserMessage) {
         const message = this.extractMessageText(entryType === "user_message" ? entry.payload : nestedPayload);
+        if (message && this.isManagedHandoffRelayPrompt(message)) {
+          inManagedHandoffTurn = true;
+          continue;
+        }
+
+        inManagedHandoffTurn = false;
         if (message) {
           lastUserMessage = message;
           userMessageCount += 1;
@@ -892,6 +930,10 @@ export class RecentWorkService {
             status = "active";
           }
         }
+      }
+
+      if (inManagedHandoffTurn) {
+        continue;
       }
 
       if (entryType === "task_complete" || nestedType === "task_complete") {
@@ -952,6 +994,8 @@ export class RecentWorkService {
       }
     }
 
+    const latestPendingApproval = Array.from(pendingApprovalRequests.values()).at(-1);
+
     if (!sessionId) {
       return undefined;
     }
@@ -984,6 +1028,7 @@ export class RecentWorkService {
         user_message_count: userMessageCount,
         agent_message_count: agentMessageCount,
         total_tokens: totalTokens,
+        pending_observed_review: latestPendingApproval,
       },
     };
   }
@@ -1040,7 +1085,7 @@ export class RecentWorkService {
     const objectPayload = payload as Record<string, unknown>;
     const direct = this.pickString(objectPayload.message, objectPayload.text);
     if (direct) {
-      return direct;
+      return this.sanitizeImportedMessageText(direct);
     }
 
     if (Array.isArray(objectPayload.content)) {
@@ -1056,11 +1101,24 @@ export class RecentWorkService {
         .filter((value): value is string => Boolean(value));
 
       if (textParts.length > 0) {
-        return textParts.join("\n");
+        return this.sanitizeImportedMessageText(textParts.join("\n"));
       }
     }
 
     return undefined;
+  }
+
+  private sanitizeImportedMessageText(text: string): string | undefined {
+    const stripped = text
+      .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, "")
+      .replace(/\r/g, "")
+      .trim();
+
+    return stripped || undefined;
+  }
+
+  private isManagedHandoffRelayPrompt(text: string): boolean {
+    return /^Buddy managed handoff update for the observed thread\./i.test(text.trim());
   }
 
   private extractChangedFilePaths(entry: Record<string, unknown>, nestedPayload?: Record<string, unknown>): string[] {
@@ -1458,12 +1516,16 @@ export class RecentWorkService {
 
     if (entryType === "response_item" && nestedType === "function_call" && nestedPayload) {
       this.registerCodexCommandCall(nestedPayload, pendingCommands);
-      return [];
+      return this.toObservedApprovalPayload(nestedPayload)
+        ? [this.toObservedApprovalPayload(nestedPayload)!]
+        : [];
     }
 
     if (entryType === "response_item" && nestedType === "custom_tool_call" && nestedPayload) {
       this.registerCodexCommandCall(nestedPayload, pendingCommands);
-      return [];
+      return this.toObservedApprovalPayload(nestedPayload)
+        ? [this.toObservedApprovalPayload(nestedPayload)!]
+        : [];
     }
 
     if (entryType === "response_item" && (nestedType === "function_call_output" || nestedType === "custom_tool_call_output") && nestedPayload) {
@@ -1515,6 +1577,7 @@ export class RecentWorkService {
     pendingCommands.set(callId, {
       cmd: this.describeCodexCommand(payload),
       sideEffects: this.extractCodexSideEffects(payload),
+      approvalRequest: this.toObservedApprovalPayload(payload),
     });
   }
 
@@ -1548,6 +1611,13 @@ export class RecentWorkService {
       duration_ms: durationMs,
       stdout_preview: stdoutPreview,
     }];
+    if (pending?.approvalRequest) {
+      commandEvents.unshift({
+        type: "approval_resolved",
+        action: pending.approvalRequest.action,
+        decision: "approved",
+      });
+    }
     const testRun = this.extractTestRunActivity(command, output, stdoutPreview, durationMs);
     if (testRun) {
       commandEvents.push(testRun);
@@ -1603,6 +1673,179 @@ export class RecentWorkService {
     }
 
     return this.parseApplyPatchSideEffects(input);
+  }
+
+  private toObservedApprovalPayload(payload: Record<string, unknown>): Extract<ActivityPayload, { type: "approval_requested" }> | undefined {
+    const approvalRequest = this.extractCodexApprovalRequest(payload);
+    if (!approvalRequest) {
+      return undefined;
+    }
+
+    return {
+      type: "approval_requested",
+      action: approvalRequest.action,
+      context: approvalRequest.context,
+    };
+  }
+
+  private extractCodexApprovalRequest(payload: Record<string, unknown>): {
+    action: string;
+    context: string;
+    cmd?: string;
+    success_checks?: TakeoverSuccessCheck[];
+  } | undefined {
+    if (this.pickString(payload.name) !== "exec_command") {
+      return undefined;
+    }
+
+    const parsedArguments = this.parseJsonIfObject(this.pickString(payload.arguments));
+    const customToolPayload = this.pickString(payload.input)
+      ? parseJsonSafe<Record<string, unknown> | undefined>(this.pickString(payload.input), undefined)
+      : undefined;
+    const argumentsPayload = parsedArguments ?? customToolPayload;
+    if (!argumentsPayload || this.pickString(argumentsPayload.sandbox_permissions) !== "require_escalated") {
+      return undefined;
+    }
+
+    const command = this.pickString(argumentsPayload.cmd);
+    const justification = this.pickString(argumentsPayload.justification);
+    const actionTarget = command ?? "run an escalated command";
+    const compactActionTarget = actionTarget.length > 96
+      ? `${actionTarget.slice(0, 95).trimEnd()}…`
+      : actionTarget;
+
+    return {
+      action: `Approve command: ${compactActionTarget}`,
+      context: justification ?? `Approval is required before running: ${actionTarget}`,
+      cmd: command,
+      success_checks: this.inferSuccessChecks(command),
+    };
+  }
+
+  private pickObservedTakeover(record: RecentWorkRecord): ObservedTakeoverContext | undefined {
+    const pending = record.metadata?.pending_observed_review;
+    if (!pending || typeof pending !== "object") {
+      return undefined;
+    }
+
+    const objectPending = pending as Record<string, unknown>;
+    const action = this.pickString(objectPending.action);
+    const context = this.pickString(objectPending.context);
+    if (!action || !context) {
+      return undefined;
+    }
+
+    const successChecks = Array.isArray(objectPending.success_checks)
+      ? objectPending.success_checks
+        .map((item) => this.toSuccessCheck(item))
+        .filter((item): item is TakeoverSuccessCheck => Boolean(item))
+      : [];
+
+    return {
+      action,
+      context,
+      cmd: this.pickString(objectPending.cmd),
+      detected_at: this.pickString(objectPending.detected_at),
+      success_checks: successChecks.length > 0 ? successChecks : undefined,
+    };
+  }
+
+  private toSuccessCheck(value: unknown): TakeoverSuccessCheck | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    const objectValue = value as Record<string, unknown>;
+    const kind = this.pickString(objectValue.kind);
+    if (kind !== "path_exists" && kind !== "command_exit_zero") {
+      return undefined;
+    }
+
+    return {
+      kind,
+      path: this.pickString(objectValue.path),
+      path_type: this.pickString(objectValue.path_type) as TakeoverSuccessCheck["path_type"] | undefined,
+      cmd: this.pickString(objectValue.cmd),
+    };
+  }
+
+  private inferSuccessChecks(command: string | undefined): TakeoverSuccessCheck[] | undefined {
+    const normalized = command?.trim();
+    if (!normalized) {
+      return undefined;
+    }
+
+    const checks: TakeoverSuccessCheck[] = [{
+      kind: "command_exit_zero",
+      cmd: normalized,
+    }];
+
+    const targetPath = this.inferTargetPath(normalized);
+    if (targetPath) {
+      checks.push({
+        kind: "path_exists",
+        path: targetPath.path,
+        path_type: targetPath.pathType,
+      });
+    }
+
+    return checks;
+  }
+
+  private inferTargetPath(command: string): { path: string; pathType: "file" | "directory" | "any" } | undefined {
+    const tokens = this.tokenizeShellWords(command);
+    if (tokens.length < 2) {
+      return undefined;
+    }
+
+    const executable = basename(tokens[0] ?? "").toLowerCase();
+    const positional = tokens.slice(1).filter((token) => !token.startsWith("-"));
+    const target = positional.at(-1);
+    if (!target) {
+      return undefined;
+    }
+
+    const resolvedTarget = this.normalizeShellPath(target);
+    if (!resolvedTarget) {
+      return undefined;
+    }
+
+    if (["cp", "mv", "touch", "install", "ln", "rsync", "dd"].includes(executable)) {
+      return { path: resolvedTarget, pathType: "file" };
+    }
+
+    if (executable === "mkdir") {
+      return { path: resolvedTarget, pathType: "directory" };
+    }
+
+    return undefined;
+  }
+
+  private tokenizeShellWords(command: string): string[] {
+    const matches = command.match(/"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\\.|[^\s]+/g) ?? [];
+    return matches
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .map((token) => {
+        if ((token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"))) {
+          return token.slice(1, -1);
+        }
+
+        return token.replace(/\\([\\ "'`$])/g, "$1");
+      });
+  }
+
+  private normalizeShellPath(candidate: string): string | undefined {
+    if (!candidate || candidate === "-" || candidate.startsWith("|")) {
+      return undefined;
+    }
+
+    if (candidate.startsWith("~/")) {
+      const home = process.env.HOME ?? "";
+      return home ? join(home, candidate.slice(2)) : undefined;
+    }
+
+    return isAbsolute(candidate) ? candidate : undefined;
   }
 
   private parseApplyPatchSideEffects(input: string): ActivityPayload[] {

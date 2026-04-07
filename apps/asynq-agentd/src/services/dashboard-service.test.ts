@@ -192,6 +192,444 @@ test("dashboard service uses cached model-backed continue summaries when availab
   rmSync(root, { recursive: true, force: true });
 });
 
+test("dashboard service hides managed runtime transcripts from continue working", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  const task = tasks.create({
+    title: "Managed Codex follow-up",
+    description: "Continue the daemon-owned Codex work.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+  });
+  const session = sessions.createFromTask(task, "codex-cli");
+  sessions.mergeMetadata(session.id, {
+    codex_session_id: "codex-managed-1",
+  });
+
+  storage.upsertRecentWork({
+    id: "codex-managed-1",
+    source_path: "/tmp/codex-managed.jsonl",
+    project_path: "/tmp/demo",
+    title: "Managed transcript should stay hidden",
+    summary: "Managed transcript duplicate.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      last_user_message: "Managed transcript duplicate.",
+    },
+  });
+  storage.upsertRecentWork({
+    id: "codex-observed-1",
+    source_path: "/tmp/codex-observed.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed transcript should stay visible",
+    summary: "Observed transcript.",
+    source_type: "codex-session-file",
+    status: "ended",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      last_user_message: "Observed transcript.",
+    },
+  });
+
+  const continueWorking = dashboard.getContinueWorking();
+  assert.ok(continueWorking.items.some((item) => item.kind === "managed_session" && item.session_id === session.id));
+  assert.ok(!continueWorking.items.some((item) => item.kind === "recent_work" && item.recent_work_id === "codex-managed-1"));
+  assert.ok(continueWorking.items.some((item) => item.kind === "recent_work" && item.recent_work_id === "codex-observed-1"));
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service hides internal Codex artifact sessions from continue working", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "codex-internal-task",
+    source_path: "/tmp/codex-internal-task.jsonl",
+    project_path: "/tmp/demo",
+    title: "Task: Continue: Correct observed session timestamps",
+    summary: "Internal managed task prompt.",
+    source_type: "codex-session-file",
+    status: "ended",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      raw_user_input: "Task: Continue: Correct observed session timestamps\n\nContinue the managed session from its latest completed state.",
+      last_user_message: "Task: Continue: Correct observed session timestamps\n\nContinue the managed session from its latest completed state.",
+    },
+  });
+  storage.upsertRecentWork({
+    id: "codex-summary-batch",
+    source_path: "/tmp/codex-summary-batch.jsonl",
+    project_path: "/tmp/demo",
+    title: "Rewrite recent work into compact mobile cards for Asynq Buddy.",
+    summary: "Internal summary batch prompt.",
+    source_type: "codex-session-file",
+    status: "ended",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      raw_user_input: "Rewrite recent work into compact mobile cards for Asynq Buddy.",
+    },
+  });
+  storage.upsertRecentWork({
+    id: "codex-real-observed",
+    source_path: "/tmp/codex-real-observed.jsonl",
+    project_path: "/tmp/demo",
+    title: "Correct observed session timestamps",
+    summary: "Observed transcript.",
+    source_type: "codex-session-file",
+    status: "ended",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      last_user_message: "Correct observed session timestamps",
+      last_agent_message: "Observed transcript.",
+    },
+  });
+
+  const continueWorking = dashboard.getContinueWorking();
+  assert.ok(!continueWorking.items.some((item) => item.kind === "recent_work" && item.recent_work_id === "codex-internal-task"));
+  assert.ok(!continueWorking.items.some((item) => item.kind === "recent_work" && item.recent_work_id === "codex-summary-batch"));
+  assert.ok(continueWorking.items.some((item) => item.kind === "recent_work" && item.recent_work_id === "codex-real-observed"));
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service inherits observed linkage through managed continuation chains and only lists latest managed leaf", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_1",
+    source_path: "/tmp/observed.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed thread",
+    summary: "Observed summary.",
+    source_type: "codex-session-file",
+    status: "ended",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      last_user_message: "Observed thread",
+      last_agent_message: "Observed summary.",
+    },
+  });
+
+  const rootTask = tasks.create({
+    title: "Managed follow-up",
+    description: "First managed session.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+    context: {
+      source_recent_work_id: "recent_observed_1",
+    },
+  });
+  const rootSession = sessions.createFromTask(rootTask, "codex-cli");
+  sessions.transition(rootSession.id, "completed");
+  tasks.update(rootTask.id, {
+    status: "completed",
+    assigned_session_id: rootSession.id,
+  });
+
+  const childTask = tasks.create({
+    title: "Managed follow-up",
+    description: "Continuation without direct source_recent_work_id.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+    context: {
+      parent_session_id: rootSession.id,
+    },
+  });
+  const childSession = sessions.createFromTask(childTask, "codex-cli");
+  sessions.transition(childSession.id, "completed");
+  tasks.update(childTask.id, {
+    status: "completed",
+    assigned_session_id: childSession.id,
+  });
+
+  const managedSessions = dashboard.getManagedSessions();
+  assert.equal(managedSessions.items.length, 1);
+  assert.equal(managedSessions.items[0]?.session_id, childSession.id);
+  assert.equal(managedSessions.items[0]?.source_observed_id, "recent_observed_1");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service exposes observed Codex approval requests in attention required", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_review",
+    source_path: "/tmp/observed-review.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed cleanup thread",
+    summary: "Waiting on an escalated cleanup command.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      last_user_message: "Clean up legacy rows",
+      last_agent_message: "Waiting on approval before the cleanup can continue.",
+      pending_observed_review: {
+        action: "Approve command: node cleanup.js",
+        context: "Do you want me to delete the legacy managed-session rows from ~/.asynq-agentd?",
+        cmd: "node cleanup.js",
+      },
+    },
+  });
+
+  const overview = dashboard.getOverview();
+  assert.equal(overview.counts.approvals_pending, 1);
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items.length, 1);
+  assert.equal(attention.items[0]?.approval_id, "observed-review:recent_observed_review");
+  assert.equal(attention.items[0]?.can_resolve, false);
+  assert.equal(attention.items[0]?.recent_work_id, "recent_observed_review");
+  assert.equal(attention.items[0]?.review?.source_session_kind, "observed");
+
+  const approvalDetail = dashboard.getApprovalDetail("observed-review:recent_observed_review");
+  assert.equal(approvalDetail?.review?.command, "node cleanup.js");
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_observed_review");
+  assert.equal(observed?.observed_approval_id, "observed-review:recent_observed_review");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service suppresses observed approval once a managed takeover exists", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_review_hidden",
+    source_path: "/tmp/observed-review-hidden.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed cleanup thread",
+    summary: "Waiting on approval before cleanup.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      pending_observed_review: {
+        action: "Approve command: cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+        context: "Do you want me to back up your agentd SQLite database?",
+        cmd: "cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+        detected_at: "2026-03-28T01:00:00.000Z",
+      },
+    },
+  });
+
+  const task = tasks.create({
+    title: "Continue observed cleanup",
+    description: "Take over the observed cleanup flow.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+    context: {
+      source_recent_work_id: "recent_observed_review_hidden",
+    },
+  });
+  const session = sessions.createFromTask(task, "codex-cli");
+  tasks.update(task.id, {
+    status: "running",
+    assigned_session_id: session.id,
+  });
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items.length, 0);
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_observed_review_hidden");
+  assert.equal(observed?.observed_approval_id, undefined);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service keeps a newer observed approval visible despite an older completed takeover", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_review_newer",
+    source_path: "/tmp/observed-review-newer.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed cleanup thread",
+    summary: "Waiting on a fresh approval.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: "2026-03-28T01:10:00.000Z",
+    metadata: {
+      pending_observed_review: {
+        action: "Approve command: cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+        context: "Do you want me to back up your agentd SQLite database?",
+        cmd: "cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+        detected_at: "2026-03-28T01:10:00.000Z",
+      },
+    },
+  });
+
+  const task = tasks.create({
+    title: "Earlier observed cleanup takeover",
+    description: "Older follow-up that already completed.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+    context: {
+      source_recent_work_id: "recent_observed_review_newer",
+    },
+  });
+  const session = sessions.createFromTask(task, "codex-cli");
+  tasks.update(task.id, {
+    status: "completed",
+    assigned_session_id: session.id,
+  });
+  storage.upsertTask({
+    ...(storage.getTask(task.id) ?? task),
+    updated_at: "2026-03-28T01:05:00.000Z",
+  });
+  storage.upsertSession({
+    ...(storage.getSession(session.id) ?? session),
+    updated_at: "2026-03-28T01:05:00.000Z",
+  });
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items.length, 1);
+  assert.equal(attention.items[0]?.approval_id, "observed-review:recent_observed_review_newer");
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_observed_review_newer");
+  assert.equal(observed?.observed_approval_id, "observed-review:recent_observed_review_newer");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("dashboard service filters noisy and duplicate continue items", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
@@ -329,6 +767,71 @@ test("dashboard service refreshes recent-work detail from disk before returning 
   const detail = dashboard.getRecentWorkDetail("session-1");
   assert.equal(detail?.summary, "Fresh observed summary after more work");
   assert.equal(detail?.raw_agent_response, "Fresh observed summary after more work");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service marks observed approvals outside the workspace as desktop-only", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+  });
+
+  storage.upsertRecentWork({
+    id: "observed-outside-workspace",
+    source_path: "/tmp/observed-outside.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed backup approval",
+    summary: "Need permission to back up sqlite.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: "2026-03-28T01:33:22.000Z",
+    metadata: {
+      last_user_message: "Create a backup of the agentd sqlite file.",
+      last_agent_message: "Waiting for permission to write outside the workspace.",
+      pending_observed_review: {
+        action: "Approve command: cp /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite.backup",
+        context: "This command writes outside the project workspace.",
+        cmd: "cp /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite.backup",
+        detected_at: "2026-03-28T01:33:22.000Z",
+        success_checks: [
+          {
+            kind: "command_exit_zero",
+            cmd: "cp /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite /Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite.backup",
+          },
+          {
+            kind: "path_exists",
+            path: "/Users/asynqroot/.asynq-agentd/asynq-agentd.sqlite.backup",
+            path_type: "file",
+          },
+        ],
+      },
+    },
+  });
+
+  const detail = dashboard.getApprovalDetail("observed-review:observed-outside-workspace");
+  assert.equal(detail?.review?.takeover_supported, false);
+  assert.equal(detail?.review?.show_stats, false);
+  assert.match(detail?.review?.takeover_reason ?? "", /outside the managed workspace/i);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

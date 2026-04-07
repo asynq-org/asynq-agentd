@@ -601,6 +601,201 @@ test("recent work scan indexes Codex session index and session files", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("recent work scan tracks pending observed Codex approval requests", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-work-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = join(root, ".codex");
+  const projectRoot = join(root, "project");
+  const sessionDir = join(codexRoot, "sessions", "2026", "03", "28");
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  writeFileSync(join(sessionDir, "observed-approval.jsonl"), [
+    JSON.stringify({
+      timestamp: "2026-03-28T00:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: "observed-approval",
+        cwd: projectRoot,
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-28T00:00:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "Investigate managed-session cleanup",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-28T00:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "call_observed_approval",
+        arguments: JSON.stringify({
+          cmd: "node cleanup.js",
+          workdir: projectRoot,
+          sandbox_permissions: "require_escalated",
+          justification: "Do you want me to delete the legacy managed-session rows from ~/.asynq-agentd?",
+        }),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-28T00:00:06.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "Waiting on approval before the cleanup can continue.",
+      },
+    }),
+    "",
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "observed-approval");
+  const preview = recentWork.list({
+    includeActivityPreview: true,
+    previewTypes: ["approval_requested"],
+    previewLimit: 5,
+  }).find((item) => item.id === "observed-approval");
+
+  assert.ok(record);
+  assert.equal(record?.status, "active");
+  assert.equal(
+    (record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.action,
+    "Approve command: node cleanup.js",
+  );
+  assert.match(
+    String((record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.context ?? ""),
+    /delete the legacy managed-session rows/i,
+  );
+  assert.ok(
+    String((record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.detected_at ?? "").length > 0,
+  );
+  assert.equal(
+    ((record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks as Array<Record<string, unknown>> | undefined)?.[0]?.kind,
+    "command_exit_zero",
+  );
+  assert.equal(preview?.activity_preview?.[0]?.payload.type, "approval_requested");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan strips environment context wrappers from Codex user messages", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-codex-env-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = resolve(root, ".codex");
+  const sessionsRoot = resolve(codexRoot, "sessions", "2026", "03", "25");
+  const projectRoot = resolve(root, "project");
+  mkdirSync(sessionsRoot, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+
+  writeFileSync(resolve(sessionsRoot, "rollout-2026-03-25-codex-env.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "codex-env", cwd: projectRoot } }),
+    JSON.stringify({
+      type: "user_message",
+      timestamp: "2026-03-25T10:00:00.000Z",
+      payload: {
+        message: "<environment_context>\n<cwd>/tmp/project</cwd>\n<shell>zsh</shell>\n</environment_context>\n\nCorrect observed session timestamps",
+      },
+    }),
+    JSON.stringify({
+      type: "agent_message",
+      timestamp: "2026-03-25T10:00:10.000Z",
+      payload: {
+        message: "I am checking the timestamp grouping logic now.",
+      },
+    }),
+    JSON.stringify({
+      type: "task_complete",
+      timestamp: "2026-03-25T10:00:20.000Z",
+      payload: {},
+    }),
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "codex-env");
+
+  assert.equal(record?.title, "Correct observed session timestamps");
+  assert.equal(record?.metadata?.last_user_message, "Correct observed session timestamps");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan ignores Buddy managed handoff relay turns in Codex sessions", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-codex-handoff-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = resolve(root, ".codex");
+  const sessionsRoot = resolve(codexRoot, "sessions", "2026", "03", "25");
+  const projectRoot = resolve(root, "project");
+  mkdirSync(sessionsRoot, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+
+  writeFileSync(resolve(sessionsRoot, "rollout-2026-03-25-codex-handoff.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "codex-handoff", cwd: projectRoot } }),
+    JSON.stringify({
+      type: "user_message",
+      timestamp: "2026-03-25T10:00:00.000Z",
+      payload: { message: "Correct observed session timestamps" },
+    }),
+    JSON.stringify({
+      type: "agent_message",
+      timestamp: "2026-03-25T10:00:10.000Z",
+      payload: { message: "I fixed the timestamp grouping logic." },
+    }),
+    JSON.stringify({
+      type: "task_complete",
+      timestamp: "2026-03-25T10:00:20.000Z",
+      payload: {},
+    }),
+    JSON.stringify({
+      type: "user_message",
+      timestamp: "2026-03-25T10:01:00.000Z",
+      payload: { message: "Buddy managed handoff update for the observed thread.\n\nDo not continue the prior task." },
+    }),
+    JSON.stringify({
+      type: "agent_message",
+      timestamp: "2026-03-25T10:01:05.000Z",
+      payload: { message: "Doplnil jsem backward-compatible fallback pro starsi continuation chainy." },
+    }),
+    JSON.stringify({
+      type: "task_complete",
+      timestamp: "2026-03-25T10:01:10.000Z",
+      payload: {},
+    }),
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "codex-handoff");
+
+  assert.equal(record?.title, "Correct observed session timestamps");
+  assert.equal(record?.summary, "I fixed the timestamp grouping logic.");
+  assert.equal(record?.status, "ended");
+  assert.equal(record?.metadata?.last_agent_message, "I fixed the timestamp grouping logic.");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("recent work scan survives oversized Codex session files by sampling head and tail", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-large-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));

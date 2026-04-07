@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, mkdtempSync } from "node:fs";
+import { rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AsynqAgentdStorage } from "../db/storage.ts";
@@ -76,6 +76,40 @@ class RelayRecordingCodexAdapter extends MockAgentAdapter {
       projectPath: options?.projectPath,
       modelPreference: options?.modelPreference,
     });
+  }
+}
+
+class ObservedTakeoverApprovalAdapter implements AgentAdapter {
+  readonly name = "observed-takeover-approval";
+  runs = 0;
+
+  async runTask(): Promise<void> {
+    this.runs += 1;
+  }
+}
+
+class ObservedTakeoverVerificationAdapter implements AgentAdapter {
+  readonly name = "observed-takeover-verification";
+  private readonly command: string;
+  private readonly outputPath?: string;
+
+  constructor(command: string, outputPath?: string) {
+    this.command = command;
+    this.outputPath = outputPath;
+  }
+
+  async runTask(_task: TaskRecord, _session: SessionRecord, hooks: AdapterHooks): Promise<void> {
+    hooks.onEvent({
+      type: "command_run",
+      cmd: this.command,
+      exit_code: 0,
+      duration_ms: 10,
+      stdout_preview: "managed takeover command completed",
+    });
+
+    if (this.outputPath) {
+      writeFileSync(this.outputPath, "backup");
+    }
   }
 }
 
@@ -175,6 +209,49 @@ test("scheduler stages approvals before running approval-required tasks", async 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("scheduler stages Buddy approval before running a protected observed takeover command", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const config = new ConfigService(storage);
+  const adapter = new ObservedTakeoverApprovalAdapter();
+  const scheduler = new SchedulerService(
+    storage,
+    tasks,
+    sessions,
+    config,
+    new Map([
+      ["codex", adapter],
+    ]),
+  );
+
+  const task = tasks.create({
+    title: "Take over observed backup",
+    description: "Replay a blocked observed backup command.",
+    project_path: "/tmp/project",
+    agent_type: "codex",
+    context: {
+      observed_takeover: {
+        action: "Approve command: cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+        context: "Do you want me to back up your agentd SQLite database?",
+        cmd: "cp ~/.asynq-agentd/asynq-agentd.sqlite ~/.asynq-agentd/asynq-agentd.sqlite.backup-test",
+      },
+    },
+  });
+
+  await scheduler.tick();
+
+  const pausedTask = tasks.get(task.id);
+  assert.equal(pausedTask?.status, "paused");
+  assert.equal(adapter.runs, 0);
+  assert.equal(storage.listApprovals("pending").length, 1);
+  assert.match(storage.listApprovals("pending")[0]?.context ?? "", /Observed takeover command/);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("scheduler reschedules recurring tasks after a successful run", async () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
@@ -213,6 +290,55 @@ test("scheduler reschedules recurring tasks after a successful run", async () =>
   assert.ok(rescheduled?.last_run_at);
   assert.ok(rescheduled?.next_run_at);
   assert.ok(new Date(rescheduled.next_run_at ?? 0).getTime() > Date.now());
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("scheduler fails observed takeover completion when success checks are not satisfied", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const config = new ConfigService(storage);
+  const missingPath = join(root, "missing-backup.sqlite");
+  const command = `cp /tmp/source.sqlite ${missingPath}`;
+  const scheduler = new SchedulerService(
+    storage,
+    tasks,
+    sessions,
+    config,
+    new Map([
+      ["codex", new ObservedTakeoverVerificationAdapter(command)],
+    ]),
+  );
+
+  const task = tasks.create({
+    title: "Verify observed takeover backup",
+    description: "Re-run the blocked backup command.",
+    project_path: root,
+    agent_type: "codex",
+    context: {
+      observed_takeover: {
+        action: `Approve command: ${command}`,
+        context: "Do the backup and verify it exists.",
+        cmd: command,
+        success_checks: [
+          { kind: "command_exit_zero", cmd: command },
+          { kind: "path_exists", path: missingPath, path_type: "file" },
+        ],
+      },
+    },
+  });
+
+  await scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  assert.equal(tasks.get(task.id)?.status, "failed");
+  const session = sessions.list()[0];
+  assert.equal(session?.state, "errored");
+  const errors = storage.listActivity({ session_id: session?.id, limit: 20 }).filter((event) => event.payload.type === "error");
+  assert.match((errors[0]?.payload.type === "error" ? errors[0].payload.message : ""), /expected path is still missing/i);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

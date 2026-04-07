@@ -1,6 +1,7 @@
+import { existsSync, statSync } from "node:fs";
 import type { AgentAdapter } from "../adapters/agent-adapter.ts";
 import type { AsynqAgentdStorage } from "../db/storage.ts";
-import type { TaskRecord } from "../domain.ts";
+import type { ActivityRecord, ObservedTakeoverContext, TakeoverSuccessCheck, TaskRecord } from "../domain.ts";
 import { nowIso } from "../utils/time.ts";
 import { getNextRunAt, isTaskDue } from "../utils/schedule.ts";
 import { SessionService } from "./session-service.ts";
@@ -99,6 +100,10 @@ export class SchedulerService {
     for (const task of candidates) {
       if (task.status === "queued" && task.approval_required && !task.assigned_session_id) {
         this.stageApproval(task);
+        continue;
+      }
+
+      if (task.status === "queued" && !task.assigned_session_id && this.stageObservedTakeoverApproval(task)) {
         continue;
       }
 
@@ -216,6 +221,35 @@ export class SchedulerService {
     );
   }
 
+  private stageObservedTakeoverApproval(task: TaskRecord): boolean {
+    const observedTakeover = task.context?.observed_takeover;
+    const command = pickString(observedTakeover?.cmd);
+    if (!observedTakeover || !command) {
+      return false;
+    }
+
+    const decision = this.approvalPolicy.shouldRequireApproval(
+      { type: "command_intent", cmd: command, source: "tool_call" },
+      task,
+      this.config.getEffective(task.project_path),
+    );
+    if (!decision) {
+      return false;
+    }
+
+    const session = this.sessions.createFromTask(task, "approval-gate");
+    this.tasks.update(task.id, {
+      status: "paused",
+      assigned_session_id: session.id,
+    });
+    this.sessions.requestApproval(
+      session.id,
+      decision.action,
+      `${decision.context}\n\nObserved takeover command: ${command}`,
+    );
+    return true;
+  }
+
   private async runTask(task: TaskRecord, existingSessionId?: string): Promise<void> {
     if (this.runningSessions.has(task.id)) {
       return;
@@ -311,6 +345,23 @@ export class SchedulerService {
       const postRunSession = this.sessions.getRecord(session.id);
       const postRunTask = this.tasks.get(task.id);
       if (postRunSession?.state === "waiting_approval" || postRunTask?.status === "paused") {
+        return;
+      }
+
+      const takeoverFailure = this.verifyObservedTakeover(task, session.id);
+      if (takeoverFailure) {
+        this.sessions.recordEvent(session.id, {
+          type: "error",
+          message: takeoverFailure,
+          recoverable: true,
+        });
+        this.sessions.transition(session.id, "errored");
+        this.tasks.update(task.id, {
+          status: "failed",
+          assigned_session_id: session.id,
+          last_run_at: nowIso(),
+        });
+        await this.relayManagedHandoff(task.id, session.id, "failed");
         return;
       }
 
@@ -479,5 +530,72 @@ export class SchedulerService {
     }
 
     return Array.from(files);
+  }
+
+  private verifyObservedTakeover(task: TaskRecord, sessionId: string): string | undefined {
+    const observedTakeover = task.context?.observed_takeover;
+    if (!observedTakeover) {
+      return undefined;
+    }
+
+    const checks = observedTakeover.success_checks ?? [];
+    if (checks.length === 0) {
+      return undefined;
+    }
+
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 200 });
+    for (const check of checks) {
+      const failure = this.evaluateSuccessCheck(check, events, observedTakeover);
+      if (failure) {
+        return failure;
+      }
+    }
+
+    return undefined;
+  }
+
+  private evaluateSuccessCheck(
+    check: TakeoverSuccessCheck,
+    events: ActivityRecord[],
+    observedTakeover: ObservedTakeoverContext,
+  ): string | undefined {
+    if (check.kind === "command_exit_zero") {
+      const expected = pickString(check.cmd, observedTakeover.cmd);
+      if (!expected) {
+        return undefined;
+      }
+
+      const matched = events.some((event) =>
+        event.payload.type === "command_run"
+        && event.payload.cmd.trim() === expected.trim()
+        && event.payload.exit_code === 0);
+      return matched
+        ? undefined
+        : `Observed takeover verification failed: expected command did not finish successfully: ${expected}`;
+    }
+
+    if (check.kind === "path_exists") {
+      const targetPath = pickString(check.path);
+      if (!targetPath) {
+        return undefined;
+      }
+
+      if (!existsSync(targetPath)) {
+        return `Observed takeover verification failed: expected path is still missing: ${targetPath}`;
+      }
+
+      if (check.path_type && check.path_type !== "any") {
+        const stats = statSync(targetPath);
+        if (check.path_type === "file" && !stats.isFile()) {
+          return `Observed takeover verification failed: expected file at ${targetPath}`;
+        }
+
+        if (check.path_type === "directory" && !stats.isDirectory()) {
+          return `Observed takeover verification failed: expected directory at ${targetPath}`;
+        }
+      }
+    }
+
+    return undefined;
   }
 }

@@ -9,12 +9,28 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export type AgentType = "claude-code" | "codex" | "opencode" | "custom";
 
+export interface TakeoverSuccessCheck {
+  kind: "path_exists" | "command_exit_zero";
+  path?: string;
+  path_type?: "file" | "directory" | "any";
+  cmd?: string;
+}
+
+export interface ObservedTakeoverContext {
+  action: string;
+  context: string;
+  cmd?: string;
+  detected_at?: string;
+  success_checks?: TakeoverSuccessCheck[];
+}
+
 export interface TaskContext {
   previous_session_id?: string;
   parent_session_id?: string;
   source_recent_work_id?: string;
   source_recent_work_updated_at?: string;
   source_codex_session_id?: string;
+  observed_takeover?: ObservedTakeoverContext;
   files_to_focus?: string[];
   test_command?: string;
 }

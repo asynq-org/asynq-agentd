@@ -212,7 +212,7 @@ export function pickSourceCodexSessionId(
 }
 
 function buildContinuationDescription(
-  session: ReturnType<SessionService["getRecord"]>,
+  session: ReturnType<SessionService["get"]> | ReturnType<SessionService["getRecord"]>,
   message?: string,
   sourceRecentWork?: {
     title: string;
@@ -221,6 +221,12 @@ function buildContinuationDescription(
   },
 ) {
   const parts = ["Continue the managed session from its latest completed state."];
+
+  const priorOutput = extractLatestManagedOutput(session);
+  if (priorOutput) {
+    parts.push(`Most recent managed output: ${priorOutput}`);
+    parts.push("Preserve established decisions from the prior managed session unless the operator explicitly changes them.");
+  }
 
   if (sourceRecentWork?.title) {
     parts.push(`Observed upstream: ${sourceRecentWork.title}.`);
@@ -244,6 +250,38 @@ function buildContinuationDescription(
   }
 
   return parts.join(" ");
+}
+
+function extractLatestManagedOutput(
+  session: ReturnType<SessionService["get"]> | ReturnType<SessionService["getRecord"]>,
+): string | undefined {
+  if (!session || !("recent_events" in session) || !Array.isArray(session.recent_events)) {
+    return undefined;
+  }
+
+  for (const event of session.recent_events) {
+    const payload = event.payload;
+    if (payload.type === "agent_output" && typeof payload.message === "string" && payload.message.trim()) {
+      return compactContinuationText(payload.message);
+    }
+    if (payload.type === "agent_thinking" && typeof payload.summary === "string" && payload.summary.trim()) {
+      return compactContinuationText(payload.summary);
+    }
+    if (payload.type === "approval_requested" && typeof payload.context === "string" && payload.context.trim()) {
+      return compactContinuationText(payload.context);
+    }
+  }
+
+  return undefined;
+}
+
+function compactContinuationText(text: string, maxLength = 480): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
 export function parseTerminalControlMessage(payload: string): TerminalControlMessage {
@@ -369,6 +407,14 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         return;
       }
 
+      if (method === "DELETE" && managedSessionMatch) {
+        send(200, {
+          ok: true,
+          ...services.tasks.deleteManagedSessionTree(managedSessionMatch[1]),
+        });
+        return;
+      }
+
       if (method === "GET" && path === "/stream/events") {
         beginSse(res);
         const unsubscribe = services.liveEvents.subscribe((event) => {
@@ -423,6 +469,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
           return;
         }
 
+        const sessionDetail = services.sessions.get(session.id) ?? session;
         const task = session.task_id ? services.tasks.get(session.task_id) : undefined;
         const sourceRecentWorkId = pickString(
           task?.context?.source_recent_work_id,
@@ -432,7 +479,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         const continuation = services.tasks.create({
           title: session.title,
           description: buildContinuationDescription(
-            session,
+            sessionDetail,
             body.message,
             sourceRecentWork
               ? {
@@ -454,6 +501,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
             source_recent_work_id: sourceRecentWork?.id ?? task?.context?.source_recent_work_id,
             source_recent_work_updated_at: sourceRecentWork?.updated_at ?? task?.context?.source_recent_work_updated_at,
             source_codex_session_id: pickSourceCodexSessionId(task, sourceRecentWork),
+            observed_takeover: task?.context?.observed_takeover,
             files_to_focus: task?.context?.files_to_focus,
             test_command: task?.context?.test_command,
           },

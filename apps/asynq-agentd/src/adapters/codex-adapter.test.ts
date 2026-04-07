@@ -209,6 +209,47 @@ writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.sl
   rmSync(root, { recursive: true, force: true });
 });
 
+test("codex adapter stores session id from thread.started events", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-codex-"));
+  const projectRoot = resolve(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const scriptPath = resolve(root, "fake-codex-thread-started.mjs");
+
+  writeFileSync(scriptPath, `
+console.log(JSON.stringify({
+  type: "thread.started",
+  thread_id: "019d5078-d4b8-7f72-b81f-f4ca1b0b512f"
+}));
+console.log(JSON.stringify({
+  type: "item.completed",
+  item: {
+    id: "item_1",
+    type: "agent_message",
+    text: "Managed session started."
+  }
+}));
+`, "utf8");
+
+  const adapter = new CodexCliAdapter({
+    binPath: process.execPath,
+    binArgs: [scriptPath],
+    codexHome: resolve(root, ".codex"),
+  });
+
+  const patches: Record<string, unknown>[] = [];
+  await adapter.runTask(createTask(projectRoot), createSession(projectRoot), {
+    onEvent: () => {},
+    onSessionPatch: (patch) => {
+      patches.push(patch);
+    },
+    onTerminalData: () => {},
+  });
+
+  assert.ok(patches.some((patch) => patch.codex_session_id === "019d5078-d4b8-7f72-b81f-f4ca1b0b512f"));
+
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("codex adapter can append a short relay update into an existing conversation", async () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-codex-"));
   const projectRoot = resolve(root, "project");

@@ -277,6 +277,25 @@ export class CodexCliAdapter implements AgentAdapter {
       lines.push(`Validation command: ${task.context.test_command}`);
     }
 
+    if (task.context?.observed_takeover) {
+      const takeover = task.context.observed_takeover;
+      lines.push([
+        "Observed takeover contract:",
+        `- Action: ${takeover.action}`,
+        `- Context: ${takeover.context}`,
+        takeover.cmd ? `- Blocked command: ${takeover.cmd}` : undefined,
+        takeover.success_checks?.length
+          ? `- Success checks:\n${takeover.success_checks.map((check) =>
+            check.kind === "path_exists"
+              ? `  - path_exists ${check.path_type ?? "any"} ${check.path ?? "(missing path)"}`
+              : `  - command_exit_zero ${check.cmd ?? "(missing command)"}`).join("\n")}`
+          : undefined,
+        "- Actually perform the blocked work instead of only inspecting earlier logs.",
+        "- If Buddy approval is needed for the blocked command, request it before claiming success.",
+        "- Do not declare success unless the success checks are truly satisfied in this takeover.",
+      ].filter(Boolean).join("\n"));
+    }
+
     const queuedMessages = Array.isArray(session.metadata?.queued_operator_messages)
       ? session.metadata?.queued_operator_messages as Array<Record<string, unknown>>
       : [];
@@ -293,6 +312,12 @@ export class CodexCliAdapter implements AgentAdapter {
   }
 
   private extractSessionMetadata(entry: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (entry.type === "thread.started") {
+      return {
+        codex_session_id: this.pickString(entry.thread_id),
+      };
+    }
+
     if (entry.type !== "session_meta" || typeof entry.payload !== "object" || !entry.payload) {
       return undefined;
     }

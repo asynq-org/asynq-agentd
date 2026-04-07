@@ -1,5 +1,5 @@
 import type { AsynqAgentdStorage } from "../db/storage.ts";
-import type { ActivityPayload, ApprovalRecord, RecentWorkRecord, SessionRecord, TaskRecord } from "../domain.ts";
+import type { ActivityPayload, ApprovalRecord, RecentWorkRecord, SessionRecord, TakeoverSuccessCheck, TaskRecord } from "../domain.ts";
 import { RecentWorkService } from "./recent-work-service.ts";
 import { SessionService } from "./session-service.ts";
 import { TaskService } from "./task-service.ts";
@@ -16,6 +16,13 @@ interface DashboardServiceOptions {
   summaries: SummaryService;
   runtimes: RuntimeDiscoveryService;
 }
+
+type ObservedPendingReview = {
+  action: string;
+  context: string;
+  cmd?: string;
+  detected_at?: string;
+};
 
 export class DashboardService {
   private readonly storage: AsynqAgentdStorage;
@@ -36,9 +43,11 @@ export class DashboardService {
   }
 
   getOverview() {
+    this.refreshRecentWork();
     const sessions = this.sessions.list();
     const tasks = this.tasks.list();
     const approvals = this.storage.listApprovals("pending");
+    const observedApprovals = this.listObservedApprovals();
     const activeSessions = sessions.filter((session) => session.state === "working" || session.state === "waiting_approval");
     const runtimes = this.runtimes.list().filter((runtime) => runtime.available && runtime.id !== "custom" && runtime.mode === "real");
     const continueCount = this.getContinueWorking().items.length;
@@ -48,7 +57,7 @@ export class DashboardService {
       counts: {
         sessions_active: activeSessions.length,
         sessions_working: sessions.filter((session) => session.state === "working").length,
-        approvals_pending: approvals.length,
+        approvals_pending: approvals.length + observedApprovals.length,
         tasks_running: tasks.filter((task) => task.status === "running").length,
         tasks_paused: tasks.filter((task) => task.status === "paused").length,
         runtimes_ready: runtimes.length,
@@ -66,6 +75,7 @@ export class DashboardService {
         || session.state === "waiting_approval"
         || session.state === "completed"
       )
+      .filter((session) => !this.findLinkedManagedContinuation(session.id))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
       .slice(0, 12);
     return {
@@ -75,20 +85,24 @@ export class DashboardService {
   }
 
   getAttentionRequired() {
-    const approvals = this.storage.listApprovals("pending");
+    this.refreshRecentWork();
+    const approvals = this.storage.listApprovals("pending").map((approval) => this.toApprovalCard(approval));
+    const observedApprovals = this.listObservedApprovals();
     return {
       generated_at: nowIso(),
-      items: approvals.map((approval) => this.toApprovalCard(approval)),
+      items: [...approvals, ...observedApprovals]
+        .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     };
   }
 
   getApprovalDetail(id: string) {
+    this.refreshRecentWork();
     const approval = this.storage.getApproval(id);
-    if (!approval) {
-      return undefined;
+    if (approval) {
+      return this.toApprovalCard(approval);
     }
 
-    return this.toApprovalCard(approval);
+    return this.findObservedApproval(id);
   }
 
   getContinueWorking() {
@@ -134,6 +148,7 @@ export class DashboardService {
           summary: summarized.summary,
           next_action: summarized.nextMove ?? "continue_recent_work",
           updated_at: record.updated_at,
+          observed_approval_id: this.getObservedApprovalId(record),
           linked_managed_session_id: takeover?.session_id,
           linked_managed_session_title: takeover?.session_title,
           linked_managed_status: takeover?.status,
@@ -154,6 +169,7 @@ export class DashboardService {
     }
 
     const metadata = record.metadata ?? {};
+    const observedApproval = this.buildObservedApproval(record);
     const rawAgentResponse = this.pickString(
       metadata.raw_agent_response,
       metadata.last_agent_message,
@@ -181,6 +197,11 @@ export class DashboardService {
       raw_agent_response: rawAgentResponse,
       next_move: summarized.nextMove,
       changed_files: this.collectChangedFiles(record, rawAgentResponse),
+      approval: observedApproval
+        ? {
+            approval_id: observedApproval.approval_id,
+          }
+        : undefined,
       takeover,
       updated_at: record.updated_at,
     };
@@ -250,6 +271,7 @@ export class DashboardService {
       live_progress: this.collectSessionLiveProgress(session.id),
       source_observed: sourceObserved,
       continuation,
+      can_delete: this.tasks.canDeleteManagedSession(session.id),
       updated_at: session.updated_at,
     };
   }
@@ -286,6 +308,7 @@ export class DashboardService {
           this.summarizeRecentWorkForContinue(linkedRecentWork),
         ).title
         : undefined,
+      can_delete: this.tasks.canDeleteManagedSession(session.id),
       updated_at: session.updated_at,
     };
   }
@@ -307,6 +330,78 @@ export class DashboardService {
       next_action: "approve_or_reject",
       created_at: approval.created_at,
       review,
+    };
+  }
+
+  private listObservedApprovals() {
+    return this.recentWork.list()
+      .filter((record) => this.shouldIncludeRecentWork(record))
+      .map((record) => this.buildObservedApproval(record))
+      .filter((item): item is ReturnType<DashboardService["buildObservedApproval"]> extends infer T ? Exclude<T, undefined> : never => Boolean(item));
+  }
+
+  private findObservedApproval(id: string) {
+    return this.listObservedApprovals().find((item) => item.approval_id === id);
+  }
+
+  private buildObservedApproval(record: RecentWorkRecord) {
+    if (this.shouldSuppressObservedApproval(record)) {
+      return undefined;
+    }
+
+    const pendingReview = this.pickObservedPendingReview(record);
+    if (!pendingReview) {
+      return undefined;
+    }
+
+    const agentType = record.source_type.includes("claude") ? "claude-code" : "codex";
+    const commandSummary = pendingReview.cmd
+      ? `Pending command: ${pendingReview.cmd}`
+      : "Review the pending approval in the observed desktop session.";
+    const takeoverSupport = this.assessObservedTakeoverSupport(record, pendingReview);
+    const hasStructuredDiff = false;
+
+    return {
+      approval_id: this.getObservedApprovalId(record),
+      recent_work_id: record.id,
+      title: this.summaries.readContinueCard(
+        record,
+        this.summarizeRecentWorkTitle(record),
+        this.summarizeRecentWorkForContinue(record),
+      ).title,
+      action: pendingReview.action,
+      context: pendingReview.context,
+      agent_type: agentType,
+      project_path: record.project_path,
+      summary: record.summary,
+      next_action: "open_observed_review",
+      created_at: record.updated_at,
+      can_resolve: false,
+      review: {
+        machine: "Observed desktop session",
+        agent: agentType,
+        branch: "Observed thread",
+        project: this.projectName(record.project_path ?? "Linked project"),
+        review_hint: pendingReview.context,
+        test_status: takeoverSupport.supported
+          ? "This approval can be taken over into a managed session."
+          : (takeoverSupport.reason ?? "Resolve this permission prompt in the active desktop session."),
+        stats: {
+          files_changed: 0,
+          lines_added: 0,
+          lines_removed: 0,
+        },
+        suggested_actions: [],
+        command: pendingReview.cmd,
+        files: [],
+        read_only: true,
+        source_recent_work_id: record.id,
+        source_session_kind: "observed",
+        empty_state: commandSummary,
+        takeover_supported: takeoverSupport.supported,
+        takeover_reason: takeoverSupport.reason,
+        show_stats: hasStructuredDiff,
+      },
     };
   }
 
@@ -337,6 +432,7 @@ export class DashboardService {
         : ["Approve", "Reject", "Custom reply"],
       command: this.extractCommand(drivingEvent),
       files: fileEntries,
+      show_stats: fileEntries.length > 0 || linesAdded > 0 || linesRemoved > 0,
     };
   }
 
@@ -406,6 +502,105 @@ export class DashboardService {
   private projectName(projectPath: string): string {
     const parts = projectPath.split(/[/\\]/).filter(Boolean);
     return parts.at(-1) ?? projectPath;
+  }
+
+  private getObservedApprovalId(record: RecentWorkRecord): string | undefined {
+    return this.pickObservedPendingReview(record) && !this.shouldSuppressObservedApproval(record)
+      ? `observed-review:${record.id}`
+      : undefined;
+  }
+
+  private shouldSuppressObservedApproval(record: RecentWorkRecord): boolean {
+    const pendingReview = this.pickObservedPendingReview(record);
+    if (!pendingReview) {
+      return false;
+    }
+
+    const takeover = this.findLinkedManagedTakeover(record.id);
+    if (!takeover || takeover.status === "failed") {
+      return false;
+    }
+
+    const pendingDetectedAt = pendingReview.detected_at ?? record.updated_at;
+    return takeover.updated_at >= pendingDetectedAt;
+  }
+
+  private pickObservedPendingReview(record: RecentWorkRecord): { action: string; context: string; cmd?: string; detected_at?: string } | undefined {
+    const pending = record.metadata?.pending_observed_review;
+    if (!pending || typeof pending !== "object") {
+      return undefined;
+    }
+
+    const objectPending = pending as Record<string, unknown>;
+    const action = this.pickString(objectPending.action);
+    const context = this.pickString(objectPending.context);
+    if (!action || !context) {
+      return undefined;
+    }
+
+    return {
+      action,
+      context,
+      cmd: this.pickString(objectPending.cmd),
+      detected_at: this.pickString(objectPending.detected_at),
+    };
+  }
+
+  private assessObservedTakeoverSupport(
+    record: RecentWorkRecord,
+    pendingReview: { cmd?: string },
+  ): { supported: boolean; reason?: string } {
+    const projectPath = this.pickString(record.project_path);
+    const command = this.pickString(pendingReview.cmd);
+    if (!projectPath || !command) {
+      return {
+        supported: false,
+        reason: "This review can only be resolved in the active desktop session.",
+      };
+    }
+
+    const successChecks = Array.isArray((record.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks)
+      ? ((record.metadata?.pending_observed_review as Record<string, unknown>).success_checks as unknown[])
+          .map((item) => this.toTakeoverSuccessCheck(item))
+          .filter((item): item is TakeoverSuccessCheck => Boolean(item))
+      : [];
+
+    const externalPathCheck = successChecks.find((check) =>
+      check.kind === "path_exists"
+      && this.pickString(check.path)
+      && !this.isPathInsideProject(this.pickString(check.path)!, projectPath));
+    if (externalPathCheck?.path) {
+      return {
+        supported: false,
+        reason: `This command targets a path outside the managed workspace: ${externalPathCheck.path}`,
+      };
+    }
+
+    return { supported: true };
+  }
+
+  private toTakeoverSuccessCheck(value: unknown): TakeoverSuccessCheck | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    const objectValue = value as Record<string, unknown>;
+    const kind = this.pickString(objectValue.kind);
+    if (kind !== "path_exists" && kind !== "command_exit_zero") {
+      return undefined;
+    }
+
+    return {
+      kind,
+      path: this.pickString(objectValue.path),
+      path_type: this.pickString(objectValue.path_type) as TakeoverSuccessCheck["path_type"] | undefined,
+      cmd: this.pickString(objectValue.cmd),
+    };
+  }
+
+  private isPathInsideProject(candidatePath: string, projectPath: string): boolean {
+    const normalizedProject = projectPath.replace(/[/\\]+$/, "");
+    return candidatePath === normalizedProject || candidatePath.startsWith(`${normalizedProject}/`) || candidatePath.startsWith(`${normalizedProject}\\`);
   }
 
   private projectRelativePath(projectPath: string, candidatePath: string): string {
@@ -504,6 +699,10 @@ export class DashboardService {
       status,
       session_id: session?.id,
       session_title: session?.title,
+      updated_at: [task.updated_at, session?.updated_at]
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(-1) ?? task.updated_at,
     };
   }
 
@@ -578,6 +777,10 @@ export class DashboardService {
       return false;
     }
 
+    if (this.isManagedRuntimeRecord(record) || this.isInternalRuntimeArtifact(record)) {
+      return false;
+    }
+
     if (!this.pickString(record.project_path)) {
       return false;
     }
@@ -593,6 +796,39 @@ export class DashboardService {
     }
 
     return true;
+  }
+  private isManagedRuntimeRecord(record: RecentWorkRecord): boolean {
+    if (record.source_type !== "codex-session-file" && record.source_type !== "codex-session-index" && record.source_type !== "claude-session") {
+      return false;
+    }
+
+    return this.sessions.list().some((session) => {
+      const metadata = session.metadata ?? {};
+      return this.pickString(
+        metadata.codex_session_id,
+        metadata.codex_resume_session_id,
+        metadata.claude_session_id,
+        metadata.claude_resume_session_id,
+      ) === record.id;
+    });
+  }
+
+  private isInternalRuntimeArtifact(record: RecentWorkRecord): boolean {
+    if (record.source_type !== "codex-session-file" && record.source_type !== "codex-session-index") {
+      return false;
+    }
+
+    const metadata = record.metadata ?? {};
+    const prompt = this.pickString(
+      metadata.raw_user_input,
+      metadata.last_user_message,
+      record.title,
+    ) ?? "";
+    const normalized = prompt.trim();
+
+    return normalized.startsWith("Task:")
+      || normalized.startsWith("Rewrite recent work into compact mobile cards for Asynq Buddy.")
+      || normalized.startsWith("Buddy managed handoff update for the observed thread.");
   }
   private hasMeaningfulResumeSignal(record: RecentWorkRecord): boolean {
     const metadata = record.metadata ?? {};
@@ -759,6 +995,10 @@ export class DashboardService {
       return false;
     }
 
+    if (/^<environment_context>/i.test(normalized)) {
+      return false;
+    }
+
     if (/^(codex|claude code|login|auth|authenticate)$/i.test(normalized)) {
       return false;
     }
@@ -812,16 +1052,25 @@ export class DashboardService {
     for (const event of events) {
       const payload = event.payload;
       if (payload.type === "agent_output" && this.pickString(payload.message)) {
-        return payload.message.trim();
+        const message = payload.message.trim();
+        if (!this.isLowSignalManagedRelayText(message)) {
+          return message;
+        }
       }
       if (payload.type === "agent_thinking" && this.pickString(payload.summary)) {
-        return payload.summary.trim();
+        const summary = payload.summary.trim();
+        if (!this.isLowSignalManagedRelayText(summary)) {
+          return summary;
+        }
       }
       if (payload.type === "approval_requested" && this.pickString(payload.context)) {
         return payload.context.trim();
       }
       if ((payload.type === "file_batch" || payload.type === "file_batch_intent") && this.pickString(payload.summary)) {
-        return payload.summary.trim();
+        const summary = payload.summary.trim();
+        if (!this.isLowSignalManagedRelayText(summary)) {
+          return summary;
+        }
       }
       if (payload.type === "error" && this.pickString(payload.message)) {
         return payload.message.trim();
@@ -837,13 +1086,25 @@ export class DashboardService {
       .map((event) => {
         const payload = event.payload;
         if (payload.type === "agent_output" && this.pickString(payload.message)) {
-          return { id: String(event.id), summary: payload.message.trim(), at: event.created_at };
+          const message = payload.message.trim();
+          if (!this.isLowSignalManagedRelayText(message)) {
+            return { id: String(event.id), summary: message, at: event.created_at };
+          }
+          return undefined;
         }
         if (payload.type === "agent_thinking" && this.pickString(payload.summary)) {
-          return { id: String(event.id), summary: payload.summary.trim(), at: event.created_at };
+          const summary = payload.summary.trim();
+          if (!this.isLowSignalManagedRelayText(summary)) {
+            return { id: String(event.id), summary, at: event.created_at };
+          }
+          return undefined;
         }
         if ((payload.type === "file_batch" || payload.type === "file_batch_intent") && this.pickString(payload.summary)) {
-          return { id: String(event.id), summary: payload.summary.trim(), at: event.created_at };
+          const summary = payload.summary.trim();
+          if (!this.isLowSignalManagedRelayText(summary)) {
+            return { id: String(event.id), summary, at: event.created_at };
+          }
+          return undefined;
         }
         if ((payload.type === "command_intent" || payload.type === "command_run") && this.pickString(payload.cmd)) {
           return { id: String(event.id), summary: `Command: ${payload.cmd.trim()}`, at: event.created_at };
@@ -866,8 +1127,31 @@ export class DashboardService {
     return this.collectTerminalLiveProgress(sessionId);
   }
 
-  private linkedRecentWorkId(task: TaskRecord): string | undefined {
-    return this.pickString(task.context?.source_recent_work_id) ?? this.pickString(task.context?.previous_session_id);
+  private linkedRecentWorkId(task: TaskRecord, visitedTaskIds = new Set<string>()): string | undefined {
+    if (visitedTaskIds.has(task.id)) {
+      return undefined;
+    }
+
+    visitedTaskIds.add(task.id);
+
+    const direct = this.pickString(task.context?.source_recent_work_id);
+    if (direct) {
+      return direct;
+    }
+
+    const parentSessionId = this.pickString(task.context?.parent_session_id);
+    if (parentSessionId) {
+      const parentSession = this.sessions.getRecord(parentSessionId);
+      const parentTask = parentSession?.task_id ? this.tasks.get(parentSession.task_id) : undefined;
+      if (parentTask) {
+        const inherited = this.linkedRecentWorkId(parentTask, visitedTaskIds);
+        if (inherited) {
+          return inherited;
+        }
+      }
+    }
+
+    return this.pickString(task.context?.previous_session_id);
   }
 
   private pickManagedSessionSummary(sessionId: string, rawAgentResponse?: string): string | undefined {
@@ -915,7 +1199,65 @@ export class DashboardService {
       return latestQueued;
     }
 
-    return this.pickString(task?.description);
+    const observedTakeover = task?.context?.observed_takeover;
+    if (observedTakeover && typeof observedTakeover === "object") {
+      const pendingReview = this.pickObservedTakeoverContext(observedTakeover);
+      if (pendingReview) {
+        const sections = [
+          "Observed takeover",
+          `Requested action: ${pendingReview.action}`,
+          `Context: ${pendingReview.context}`,
+          pendingReview.cmd ? `Blocked command: ${pendingReview.cmd}` : undefined,
+        ].filter((value): value is string => Boolean(value));
+        return sections.join("\n\n");
+      }
+    }
+
+    return this.sanitizeOperatorInstruction(this.pickString(task?.description));
+  }
+
+  private sanitizeOperatorInstruction(text: string | undefined): string | undefined {
+    const value = this.pickString(text);
+    if (!value) {
+      return undefined;
+    }
+
+    const developerInstruction = value.match(/Developer instruction:\s*(.+)$/i)?.[1]?.trim();
+    const withoutReasoning = value
+      .replace(/\s*Last reasoning summary:\s*[^\n]+/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+    if (developerInstruction) {
+      return developerInstruction;
+    }
+
+    return withoutReasoning;
+  }
+
+  private isLowSignalManagedRelayText(text: string): boolean {
+    return /^Relaying managed handoff back to observed Codex thread\b/i.test(text)
+      || /^Managed handoff was appended to the observed Codex thread\.?$/i.test(text);
+  }
+
+  private pickObservedTakeoverContext(value: unknown): ObservedPendingReview | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    const objectValue = value as Record<string, unknown>;
+    const action = this.pickString(objectValue.action);
+    const context = this.pickString(objectValue.context);
+    if (!action || !context) {
+      return undefined;
+    }
+
+    return {
+      action,
+      context,
+      cmd: this.pickString(objectValue.cmd),
+      detected_at: this.pickString(objectValue.detected_at),
+    };
   }
 
   private collectSessionChangedFiles(sessionId: string): string[] {

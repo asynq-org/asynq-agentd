@@ -25,6 +25,11 @@ export class ApprovalPolicyService {
             : `Task "${task.title}" triggered a command matching approval policy: ${payload.cmd}`,
         };
       }
+
+      const sensitivePathDecision = this.requireApprovalForSensitiveWrite(payload, task);
+      if (sensitivePathDecision) {
+        return sensitivePathDecision;
+      }
     }
 
     if (payload.type === "file_delete") {
@@ -60,5 +65,57 @@ export class ApprovalPolicyService {
 
   private matchesAny(value: string, patterns: string[]): boolean {
     return patterns.some((pattern) => value.includes(pattern.trim().toLowerCase()));
+  }
+
+  private requireApprovalForSensitiveWrite(
+    payload: Extract<ActivityPayload, { type: "command_run" | "command_intent" }>,
+    task: TaskRecord,
+  ): ApprovalDecision | undefined {
+    const command = payload.cmd.trim();
+    const normalized = command.toLowerCase();
+    if (!this.looksLikeWriteCommand(normalized)) {
+      return undefined;
+    }
+
+    const sensitivePath = this.pickSensitivePath(normalized, task.project_path);
+    if (!sensitivePath) {
+      return undefined;
+    }
+
+    return {
+      action: `${payload.type === "command_intent" ? "Approve upcoming protected write" : "Approve protected write"}: ${command}`,
+      context: payload.type === "command_intent"
+        ? `Task "${task.title}" is about to write to a protected path outside the project workspace: ${sensitivePath}`
+        : `Task "${task.title}" wrote to a protected path outside the project workspace: ${sensitivePath}`,
+    };
+  }
+
+  private looksLikeWriteCommand(command: string): boolean {
+    return /\b(cp|mv|rm|mkdir|touch|install|tee|dd|ln|rsync)\b/.test(command)
+      || /\b(cat|echo|printf)\b.*[>]{1,2}/.test(command);
+  }
+
+  private pickSensitivePath(command: string, projectPath: string): string | undefined {
+    const home = (process.env.HOME ?? "").toLowerCase();
+    const project = projectPath.trim().toLowerCase();
+    const candidates = [
+      "~/.asynq-agentd",
+      `${home}/.asynq-agentd`,
+      "~/.ssh",
+      `${home}/.ssh`,
+      "~/.gnupg",
+      `${home}/.gnupg`,
+      "~/.codex",
+      `${home}/.codex`,
+      "~/.claude",
+      `${home}/.claude`,
+    ].filter(Boolean);
+
+    const matchedSensitive = candidates.find((candidate) => command.includes(candidate));
+    if (matchedSensitive && !project.startsWith(matchedSensitive.replace(/^~\//, `${home}/`))) {
+      return matchedSensitive;
+    }
+
+    return undefined;
   }
 }
