@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   ActivityPayload,
   ActivityRecord,
+  AnalyticsEventRecord,
   ApprovalRecord,
   DaemonConfig,
   RecentWorkRecord,
@@ -122,6 +123,14 @@ export class AsynqAgentdStorage {
         provider TEXT NOT NULL,
         content_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS analytics_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        properties_json TEXT
       );
     `);
 
@@ -311,6 +320,39 @@ export class AsynqAgentdStorage {
       DELETE FROM summary_cache
       WHERE session_id = ?
     `).run(sessionId);
+  }
+
+  insertAnalyticsEvent(event: Omit<AnalyticsEventRecord, "id">): AnalyticsEventRecord {
+    const result = this.db.prepare(`
+      INSERT INTO analytics_events (name, source, created_at, properties_json)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      event.name,
+      event.source,
+      event.created_at,
+      event.properties ? JSON.stringify(event.properties) : null,
+    );
+
+    return {
+      id: Number(result.lastInsertRowid),
+      ...event,
+    };
+  }
+
+  listAnalyticsEvents(limit = 100): AnalyticsEventRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM analytics_events
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(limit) as Record<string, unknown>[];
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      name: String(row.name),
+      source: String(row.source) as AnalyticsEventRecord["source"],
+      created_at: String(row.created_at),
+      properties: parseJson<Record<string, unknown>>(row.properties_json, {}),
+    }));
   }
 
   listApprovals(status?: ApprovalRecord["status"]): ApprovalRecord[] {

@@ -140,6 +140,14 @@ export interface TerminalChunkRecord {
   chunk: string;
 }
 
+export interface AnalyticsEventRecord {
+  id: number;
+  name: string;
+  source: "mobile";
+  created_at: string;
+  properties?: Record<string, unknown>;
+}
+
 export interface DaemonConfig {
   auth_token: string;
   max_parallel_sessions: number;

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>asynq-agentd</title>
+    <title>asynq-agentd · local runtime for Asynq Buddy</title>
     <meta
       name="description"
       content="Open-source local daemon and CLI for running Claude Code, Codex, and future agents behind Asynq Buddy."
@@ -30,10 +30,10 @@
       <section class="hero">
         <div class="hero-copy">
           <p class="eyebrow">Open-source local-first agent runtime</p>
-          <h1>Run coding agents on your own machine. Keep the control plane local.</h1>
+          <h1>Run coding agents on your own machine. Use Buddy as the mobile control layer.</h1>
           <p class="lede">
             <strong>asynq-agentd</strong> is an open-source daemon and operator CLI for Claude Code, Codex, and future coding agents.
-            It handles task orchestration, approvals, recent-work continuity, recovery, and live operator surfaces on top of the machine you already trust.
+            It handles task orchestration, approvals, recent-work continuity, recovery, and live operator surfaces on top of the machine you already trust. Asynq Buddy is the mobile-first operator experience built on top of this runtime.
           </p>
           <div class="hero-points">
             <span>Local daemon</span>
@@ -43,6 +43,7 @@
           </div>
           <div class="actions">
             <a href="https://github.com/asynq-org/asynq-agentd" class="button button-primary">View on GitHub</a>
+            <a href="#buddy" class="button">Why Buddy exists</a>
             <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" class="button">Usage examples</a>
             <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" class="button">API contract</a>
           </div>
@@ -88,7 +89,7 @@ $ asynq-agentctl approvals
         </div>
         <div>
           <strong>Buddy-compatible backend</strong>
-          <span>dashboard endpoints already shipped</span>
+          <span>powers observed sessions, reviews, and managed takeovers</span>
         </div>
       </section>
 
@@ -102,7 +103,7 @@ $ asynq-agentctl approvals
         <article class="card">
           <h3>Built for dashboards later</h3>
           <p>
-            The daemon already exposes dashboard-oriented endpoints for overview, attention-required, and continue-working cards. That same contract is intended to power Asynq Buddy.
+            The daemon already exposes dashboard-oriented endpoints for overview, attention-required, and continue-working cards. That same contract powers Asynq Buddy and can support other operator surfaces too.
           </p>
         </article>
         <article class="card">
@@ -111,6 +112,25 @@ $ asynq-agentctl approvals
             The runtime stays open and local-first. The future Buddy product is the polished operator experience on top: better UX, mobile workflows, pairing, and presence-aware notifications.
           </p>
         </article>
+      </section>
+
+      <section class="panel split" id="buddy">
+        <div>
+          <p class="eyebrow">Why there are two layers</p>
+          <h2><code>asynq-agentd</code> stays open. Buddy focuses on operator UX.</h2>
+          <p>
+            The split is intentional. <strong>asynq-agentd</strong> is the local runtime, CLI, and contract layer.
+            <strong> Asynq Buddy</strong> is the mobile-first product layer on top: observed views, managed follow-ups,
+            pairing, and a calmer approval workflow away from the terminal.
+          </p>
+        </div>
+        <div class="callout">
+          <p class="eyebrow">Buddy flow</p>
+          <h3>See. Decide. Take over.</h3>
+          <p>
+            Buddy is aimed at developers who want visibility into local agent work first, and remote control only when a session truly needs a human.
+          </p>
+        </div>
       </section>
 
       <section class="panel split">

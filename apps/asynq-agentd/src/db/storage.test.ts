@@ -59,3 +59,27 @@ test("storage persists tasks and sessions", () => {
   storage.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("storage persists analytics events", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-storage-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+
+  storage.insertAnalyticsEvent({
+    name: "pairing_completed",
+    source: "mobile",
+    created_at: new Date().toISOString(),
+    properties: {
+      label: "My laptop",
+      source_kind: "test",
+    },
+  });
+
+  const events = storage.listAnalyticsEvents();
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.name, "pairing_completed");
+  assert.equal(events[0]?.source, "mobile");
+  assert.equal(events[0]?.properties?.label, "My laptop");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});

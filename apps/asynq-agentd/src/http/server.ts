@@ -34,6 +34,13 @@ interface TerminalControlMessage {
   rows?: number;
 }
 
+interface AnalyticsEventInput {
+  name?: string;
+  source?: "mobile";
+  created_at?: string;
+  properties?: Record<string, unknown>;
+}
+
 function isPublicRoute(method: string, path: string): boolean {
   return method === "GET" && (path === "/" || path === "/health");
 }
@@ -550,6 +557,27 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
       if (method === "GET" && path === "/approvals") {
         const status = url.searchParams.get("status") ?? undefined;
         send(200, services.storage.listApprovals(status as never));
+        return;
+      }
+
+      if (method === "GET" && path === "/analytics/events") {
+        const limit = parsePositiveInt(url.searchParams.get("limit")) ?? 100;
+        send(200, {
+          generated_at: new Date().toISOString(),
+          items: services.storage.listAnalyticsEvents(limit),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/analytics/events") {
+        const body = await readJson<AnalyticsEventInput>(req);
+        const event = services.storage.insertAnalyticsEvent({
+          name: pickString(body.name) ?? "unknown",
+          source: body.source ?? "mobile",
+          created_at: pickString(body.created_at) ?? new Date().toISOString(),
+          properties: body.properties ?? {},
+        });
+        send(201, event);
         return;
       }
 
