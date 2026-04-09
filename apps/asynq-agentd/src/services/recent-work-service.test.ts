@@ -299,6 +299,95 @@ test("recent work scan parses real Claude session metadata and transcripts", () 
   rmSync(root, { recursive: true, force: true });
 });
 
+test("recent work scan indexes Claude Cowork desktop sessions from local agent mode storage", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-claude-desktop-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const claudeDesktopRoot = resolve(root, "Claude");
+  const projectRoot = resolve(root, "asynq-buddy");
+  const sessionDir = resolve(
+    claudeDesktopRoot,
+    "local-agent-mode-sessions",
+    "workspace-id",
+    "conversation-id",
+  );
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  writeFileSync(resolve(sessionDir, "local_cowork-session.json"), JSON.stringify({
+    sessionId: "local_cowork-session",
+    title: "Redesign landing page for startup",
+    initialMessage: "Please look at async-buddy/apps/web and redesign the landing page for Buddy.",
+    userSelectedFolders: [projectRoot],
+    model: "claude-opus-4-6",
+    createdAt: Date.now() - 60_000,
+    lastActivityAt: Date.now() - 30_000,
+    isArchived: false,
+  }));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, ".claude-empty"),
+    claudeDesktopPath: claudeDesktopRoot,
+    codexPath: resolve(root, ".codex-empty"),
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "local_cowork-session");
+
+  assert.ok(record);
+  assert.equal(record?.source_type, "claude-desktop-session");
+  assert.equal(record?.title, "Redesign landing page for startup");
+  assert.equal(record?.project_path, projectRoot);
+  assert.equal(record?.status, "active");
+  assert.match(record?.summary ?? "", /redesign the landing page/i);
+  assert.equal(record?.metadata?.runtime_label, "Claude Cowork");
+  assert.equal(record?.metadata?.model, "claude-opus-4-6");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan marks stale Claude Cowork desktop sessions as ended", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-claude-desktop-stale-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const claudeDesktopRoot = resolve(root, "Claude");
+  const projectRoot = resolve(root, "asynq-buddy");
+  const sessionDir = resolve(
+    claudeDesktopRoot,
+    "local-agent-mode-sessions",
+    "workspace-id",
+    "conversation-id",
+  );
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  writeFileSync(resolve(sessionDir, "local_cowork-stale.json"), JSON.stringify({
+    sessionId: "local_cowork-stale",
+    title: "Old Cowork session",
+    initialMessage: "Polish the landing page.",
+    userSelectedFolders: [projectRoot],
+    model: "claude-opus-4-6",
+    createdAt: Date.now() - 10 * 60_000,
+    lastActivityAt: Date.now() - 5 * 60_000,
+    isArchived: false,
+  }));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, ".claude-empty"),
+    claudeDesktopPath: claudeDesktopRoot,
+    codexPath: resolve(root, ".codex-empty"),
+  });
+  const indexed = recentWork.scan();
+  const record = indexed.find((item) => item.id === "local_cowork-stale");
+
+  assert.ok(record);
+  assert.equal(record?.source_type, "claude-desktop-session");
+  assert.equal(record?.status, "ended");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("Claude transcript with last-prompt marker is detected as ended", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-claude-ended-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));

@@ -7,6 +7,7 @@ import { nowIso } from "../utils/time.ts";
 import { SummaryService } from "./summary-service.ts";
 import { RuntimeDiscoveryService } from "./runtime-discovery-service.ts";
 import { parseJsonSafe } from "../utils/json.ts";
+import { UpdateService } from "./update-service.ts";
 
 interface DashboardServiceOptions {
   storage: AsynqAgentdStorage;
@@ -15,6 +16,7 @@ interface DashboardServiceOptions {
   recentWork: RecentWorkService;
   summaries: SummaryService;
   runtimes: RuntimeDiscoveryService;
+  updates: UpdateService;
 }
 
 type ObservedPendingReview = {
@@ -24,6 +26,62 @@ type ObservedPendingReview = {
   detected_at?: string;
 };
 
+type DashboardAttentionItem = {
+  approval_id: string;
+  session_id?: string;
+  recent_work_id?: string;
+  task_id?: string;
+  title: string;
+  action: string;
+  context: string;
+  agent_type?: string;
+  project_path?: string;
+  summary?: string;
+  next_action?: string;
+  created_at: string;
+  can_resolve?: boolean;
+  review?: {
+    machine: string;
+    agent: string;
+    branch?: string;
+    project: string;
+    review_hint: string;
+    test_status: string;
+    stats: {
+      files_changed: number;
+      lines_added: number;
+      lines_removed: number;
+    };
+    suggested_actions: string[];
+    command?: string;
+    read_only?: boolean;
+    source_recent_work_id?: string;
+    source_session_kind?: "managed" | "observed";
+    empty_state?: string;
+    takeover_supported?: boolean;
+    takeover_reason?: string;
+    show_stats?: boolean;
+    files: Array<{
+      path: string;
+      action: "edited" | "created" | "deleted";
+      lines_added?: number;
+      lines_removed?: number;
+      summary?: string;
+      diff_preview?: string[];
+    }>;
+  };
+  update?: {
+    target: "agentd" | "buddy_app";
+    current_version?: string;
+    latest_version?: string;
+    minimum_supported_version?: string;
+    release_url?: string;
+    app_store_url?: string;
+    install_supported?: boolean;
+    state?: "available" | "required" | "installing" | "restarting";
+  };
+};
+
 export class DashboardService {
   private readonly storage: AsynqAgentdStorage;
   private readonly tasks: TaskService;
@@ -31,6 +89,7 @@ export class DashboardService {
   private readonly recentWork: RecentWorkService;
   private readonly summaries: SummaryService;
   private readonly runtimes: RuntimeDiscoveryService;
+  private readonly updates: UpdateService;
   private lastRecentWorkRefreshAt = 0;
 
   constructor(options: DashboardServiceOptions) {
@@ -40,14 +99,16 @@ export class DashboardService {
     this.recentWork = options.recentWork;
     this.summaries = options.summaries;
     this.runtimes = options.runtimes;
+    this.updates = options.updates;
   }
 
-  getOverview() {
+  getOverview(client?: { app_version?: string; min_supported_agentd_version?: string }) {
     this.refreshRecentWork();
     const sessions = this.sessions.list();
     const tasks = this.tasks.list();
     const approvals = this.storage.listApprovals("pending");
     const observedApprovals = this.listObservedApprovals();
+    const updateItems = this.buildUpdateAttentionItems(client);
     const activeSessions = sessions.filter((session) => session.state === "working" || session.state === "waiting_approval");
     const runtimes = this.runtimes.list().filter((runtime) => runtime.available && runtime.id !== "custom" && runtime.mode === "real");
     const continueCount = this.getContinueWorking().items.length;
@@ -57,13 +118,18 @@ export class DashboardService {
       counts: {
         sessions_active: activeSessions.length,
         sessions_working: sessions.filter((session) => session.state === "working").length,
-        approvals_pending: approvals.length + observedApprovals.length,
+        approvals_pending: approvals.length + observedApprovals.length + updateItems.length,
         tasks_running: tasks.filter((task) => task.status === "running").length,
         tasks_paused: tasks.filter((task) => task.status === "paused").length,
         runtimes_ready: runtimes.length,
         continue_working: continueCount,
       },
       runtimes,
+      daemon: {
+        version: this.updates.getStatus().current_version,
+      },
+      updates: this.updates.getStatus(),
+      compatibility: this.updates.getCompatibility(client),
     };
   }
 
@@ -84,25 +150,156 @@ export class DashboardService {
     };
   }
 
-  getAttentionRequired() {
+  getAttentionRequired(client?: { app_version?: string; min_supported_agentd_version?: string }) {
     this.refreshRecentWork();
     const approvals = this.storage.listApprovals("pending").map((approval) => this.toApprovalCard(approval));
     const observedApprovals = this.listObservedApprovals();
+    const updateItems = this.buildUpdateAttentionItems(client);
     return {
       generated_at: nowIso(),
-      items: [...approvals, ...observedApprovals]
+      items: [...updateItems, ...approvals, ...observedApprovals]
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     };
   }
 
-  getApprovalDetail(id: string) {
+  getApprovalDetail(id: string, client?: { app_version?: string; min_supported_agentd_version?: string }) {
     this.refreshRecentWork();
+    const updateItem = this.buildUpdateAttentionItems(client).find((item) => item.approval_id === id);
+    if (updateItem) {
+      return updateItem;
+    }
+
     const approval = this.storage.getApproval(id);
     if (approval) {
       return this.toApprovalCard(approval);
     }
 
     return this.findObservedApproval(id);
+  }
+
+  private buildUpdateAttentionItems(client?: { app_version?: string; min_supported_agentd_version?: string }): DashboardAttentionItem[] {
+    const status = this.updates.getStatus();
+    const compatibility = this.updates.getCompatibility(client);
+    const createdAt = status.checked_at ?? nowIso();
+    const items: DashboardAttentionItem[] = [];
+
+    if (status.status === "update_available" && status.latest_version) {
+      items.push({
+        approval_id: "update:agentd",
+        title: "Update asynq-agentd",
+        action: `Install ${status.latest_version}`,
+        context: status.release_notes ?? "A newer agentd release is available.",
+        summary: `Update available: ${status.current_version} → ${status.latest_version}`,
+        next_action: "install_update",
+        created_at: createdAt,
+        can_resolve: false,
+        review: {
+          machine: "Linked machine",
+          agent: "custom",
+          branch: "Version management",
+          project: "asynq-agentd",
+          review_hint: status.release_notes ?? "Install the latest agentd release and restart the daemon.",
+          test_status: "The daemon will restart after installation.",
+          stats: {
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+          },
+          suggested_actions: [],
+          empty_state: "Release notes will appear here when available.",
+          show_stats: false,
+          source_session_kind: "managed",
+        },
+        update: {
+          target: "agentd",
+          current_version: status.current_version,
+          latest_version: status.latest_version,
+          release_url: status.release_url,
+          install_supported: status.install_supported,
+          state: status.status === "restarting" ? "restarting" : status.status === "installing" ? "installing" : "available",
+        },
+      });
+    }
+
+    if (compatibility.requires_buddy_update) {
+      items.push({
+        approval_id: "update:buddy",
+        title: "Update Asynq Buddy",
+        action: "Open App Store",
+        context: `Buddy ${compatibility.app_version ?? "unknown"} is older than the minimum supported version ${compatibility.min_supported_buddy_version}.`,
+        summary: "Your app is too old for this daemon build.",
+        next_action: "open_app_store",
+        created_at: nowIso(),
+        can_resolve: false,
+        review: {
+          machine: "This phone",
+          agent: "custom",
+          branch: "App compatibility",
+          project: "Asynq Buddy",
+          review_hint: `Update Buddy to at least ${compatibility.min_supported_buddy_version} to keep using the latest daemon features.`,
+          test_status: "App update required for compatibility.",
+          stats: {
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+          },
+          suggested_actions: [],
+          empty_state: "Open the App Store and install the latest Buddy build.",
+          show_stats: false,
+          source_session_kind: "managed",
+        },
+        update: {
+          target: "buddy_app",
+          current_version: compatibility.app_version,
+          latest_version: undefined,
+          minimum_supported_version: compatibility.min_supported_buddy_version,
+          app_store_url: compatibility.app_store_url,
+          install_supported: false,
+          state: "required",
+        },
+      });
+    }
+
+    if (compatibility.requires_agentd_update) {
+      items.push({
+        approval_id: "update:agentd-compatibility",
+        title: "Update asynq-agentd",
+        action: "Install compatible daemon",
+        context: `This Buddy build requires agentd ${compatibility.min_supported_agentd_version} or newer, but the paired daemon is ${compatibility.agentd_version}.`,
+        summary: "Your daemon is older than this Buddy build supports.",
+        next_action: "install_update",
+        created_at: nowIso(),
+        can_resolve: false,
+        review: {
+          machine: "Linked machine",
+          agent: "custom",
+          branch: "Daemon compatibility",
+          project: "asynq-agentd",
+          review_hint: `Update the daemon to ${compatibility.min_supported_agentd_version} or newer.`,
+          test_status: "Daemon update required for compatibility.",
+          stats: {
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+          },
+          suggested_actions: [],
+          empty_state: "The current Buddy build needs a newer daemon version.",
+          show_stats: false,
+          source_session_kind: "managed",
+        },
+        update: {
+          target: "agentd",
+          current_version: compatibility.agentd_version,
+          latest_version: status.latest_version,
+          minimum_supported_version: compatibility.min_supported_agentd_version,
+          release_url: status.release_url,
+          install_supported: status.install_supported,
+          state: "required",
+        },
+      });
+    }
+
+    return items;
   }
 
   getContinueWorking() {
@@ -137,7 +334,7 @@ export class DashboardService {
           this.summarizeRecentWorkTitle(record),
           this.summarizeRecentWorkForContinue(record),
         );
-        const takeover = this.findLinkedManagedTakeover(record.id);
+        const takeover = this.findLinkedManagedTakeover(record);
         return {
           kind: "recent_work" as const,
           recent_work_id: record.id,
@@ -182,7 +379,7 @@ export class DashboardService {
     const fallbackTitle = this.summarizeRecentWorkTitle(record);
     const fallbackSummary = this.summarizeRecentWorkForContinue(record);
     const summarized = this.summaries.readContinueCard(record, fallbackTitle, fallbackSummary);
-    const takeover = this.findLinkedManagedTakeover(record.id);
+    const takeover = this.findLinkedManagedTakeover(record);
 
     return {
       id: record.id,
@@ -516,7 +713,7 @@ export class DashboardService {
       return false;
     }
 
-    const takeover = this.findLinkedManagedTakeover(record.id);
+    const takeover = this.findLinkedManagedTakeover(record);
     if (!takeover || takeover.status === "failed") {
       return false;
     }
@@ -662,10 +859,10 @@ export class DashboardService {
     return "Recent work is available to continue.";
   }
 
-  private findLinkedManagedTakeover(recentWorkId: string) {
+  private findLinkedManagedTakeover(record: RecentWorkRecord) {
     const candidates = this.tasks
       .list()
-      .filter((task) => this.linkedRecentWorkId(task) === recentWorkId)
+      .filter((task) => this.linkedRecentWorkId(task) === record.id)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 
     const task = candidates[0];
@@ -694,7 +891,7 @@ export class DashboardService {
       status = "queued";
     }
 
-    return {
+    const linkedTakeover = {
       task_id: task.id,
       status,
       session_id: session?.id,
@@ -704,6 +901,8 @@ export class DashboardService {
         .sort()
         .at(-1) ?? task.updated_at,
     };
+
+    return linkedTakeover.updated_at >= record.updated_at ? linkedTakeover : undefined;
   }
 
   private findLinkedManagedContinuation(parentSessionId: string) {
@@ -798,7 +997,12 @@ export class DashboardService {
     return true;
   }
   private isManagedRuntimeRecord(record: RecentWorkRecord): boolean {
-    if (record.source_type !== "codex-session-file" && record.source_type !== "codex-session-index" && record.source_type !== "claude-session") {
+    if (
+      record.source_type !== "codex-session-file"
+      && record.source_type !== "codex-session-index"
+      && record.source_type !== "claude-session"
+      && record.source_type !== "claude-desktop-session"
+    ) {
       return false;
     }
 

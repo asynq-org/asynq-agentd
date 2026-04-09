@@ -1,8 +1,10 @@
 # API contract
 
+> [agentd.asynq.org](https://agentd.asynq.org) · [Usage](./usage.md) · [Architecture](./architecture.md) · [Buddy](https://buddy.asynq.org) · Apache 2.0
+
 This page documents the current public-facing daemon contract for HTTP, SSE, and WebSocket integrations.
 
-It is not a formal OpenAPI schema yet, but it is intended to be the practical contract for external tooling and the future Buddy UI.
+It is not a formal OpenAPI schema yet, but it is intended to be the practical contract for external tooling and for [Asynq Buddy](https://buddy.asynq.org), the mobile operator built on this runtime.
 
 ## Auth
 

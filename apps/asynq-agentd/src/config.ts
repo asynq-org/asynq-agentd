@@ -11,6 +11,7 @@ export interface RuntimePaths {
   tlsCertPath: string;
   tlsKeyPath: string;
   claudePath: string;
+  claudeDesktopPath: string;
   codexPath: string;
 }
 
@@ -27,6 +28,9 @@ export function resolveRuntimePaths(cwd: string): RuntimePaths {
     tlsCertPath: resolve(root, "tls", "cert.pem"),
     tlsKeyPath: resolve(root, "tls", "key.pem"),
     claudePath: process.env.CLAUDE_HOME ? resolve(process.env.CLAUDE_HOME) : resolve(process.env.HOME ?? "~", ".claude"),
+    claudeDesktopPath: process.env.CLAUDE_DESKTOP_HOME
+      ? resolve(process.env.CLAUDE_DESKTOP_HOME)
+      : resolve(process.env.HOME ?? "~", "Library", "Application Support", "Claude"),
     codexPath: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME) : resolve(process.env.HOME ?? "~", ".codex"),
   };
 }

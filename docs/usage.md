@@ -1,6 +1,8 @@
 # Usage examples
 
-This page shows practical ways to use `asynq-agentd` today from the CLI, HTTP API, and live transport layers.
+> [agentd.asynq.org](https://agentd.asynq.org) · [API](./api.md) · [Architecture](./architecture.md) · [Buddy](https://buddy.asynq.org) · Apache 2.0
+
+This page shows practical ways to use `asynq-agentd` today from the CLI, HTTP API, and live transport layers. If you'd rather drive everything from your phone, install [Asynq Buddy](https://buddy.asynq.org) — it talks to the same daemon over your tailnet.
 
 ## Start the daemon
 

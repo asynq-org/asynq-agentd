@@ -12,7 +12,9 @@ import { RecentWorkService } from "../services/recent-work-service.ts";
 import { EventStreamService } from "../services/event-stream-service.ts";
 import { TerminalStreamService } from "../services/terminal-stream-service.ts";
 import { DashboardService } from "../services/dashboard-service.ts";
+import { UpdateService } from "../services/update-service.ts";
 import { createWebSocketAccept, encodeWebSocketPongFrame, encodeWebSocketTextFrame, parseWebSocketFrames } from "../utils/websocket.ts";
+import { AGENTD_VERSION } from "../version.ts";
 
 interface AppServices {
   storage: AsynqAgentdStorage;
@@ -24,6 +26,7 @@ interface AppServices {
   liveEvents: EventStreamService;
   terminalStreams: TerminalStreamService;
   dashboard: DashboardService;
+  updates: UpdateService;
 }
 
 interface TerminalControlMessage {
@@ -344,6 +347,8 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
     const url = new URL(req.url, "http://127.0.0.1");
     const path = url.pathname;
     const method = req.method.toUpperCase();
+    const clientAppVersion = pickString(req.headers["x-asynq-buddy-version"]);
+    const clientMinAgentdVersion = pickString(req.headers["x-asynq-buddy-min-agentd-version"]);
     let requestPayload: unknown;
     const readBody = async <T>() => {
       const body = await readJson<T>(req);
@@ -373,7 +378,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         send(200, {
           name: "asynq-agentd",
           status: "ok",
-          version: "0.1.0-bootstrap",
+          version: AGENTD_VERSION,
         });
         return;
       }
@@ -384,12 +389,18 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
       }
 
       if (method === "GET" && path === "/dashboard/overview") {
-        send(200, services.dashboard.getOverview());
+        send(200, services.dashboard.getOverview({
+          app_version: clientAppVersion,
+          min_supported_agentd_version: clientMinAgentdVersion,
+        }));
         return;
       }
 
       if (method === "GET" && path === "/dashboard/attention-required") {
-        send(200, services.dashboard.getAttentionRequired());
+        send(200, services.dashboard.getAttentionRequired({
+          app_version: clientAppVersion,
+          min_supported_agentd_version: clientMinAgentdVersion,
+        }));
         return;
       }
 
@@ -581,9 +592,42 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         return;
       }
 
+      if (method === "GET" && path === "/updates/status") {
+        send(200, {
+          generated_at: new Date().toISOString(),
+          status: services.updates.getStatus(),
+          compatibility: services.updates.getCompatibility({
+            app_version: clientAppVersion,
+            min_supported_agentd_version: clientMinAgentdVersion,
+          }),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/updates/check") {
+        const status = await services.updates.checkNow();
+        send(200, {
+          ok: true,
+          status,
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/updates/install") {
+        const status = await services.updates.installUpdate();
+        send(202, {
+          ok: true,
+          status,
+        });
+        return;
+      }
+
       const approvalMatch = path.match(/^\/approvals\/([^/]+)$/);
       if (method === "GET" && approvalMatch) {
-        const approval = services.dashboard.getApprovalDetail(approvalMatch[1]);
+        const approval = services.dashboard.getApprovalDetail(approvalMatch[1], {
+          app_version: clientAppVersion,
+          min_supported_agentd_version: clientMinAgentdVersion,
+        });
         if (!approval) {
           sendNotFound();
           return;

@@ -196,7 +196,7 @@ export interface RecentWorkRecord {
   project_path?: string;
   title: string;
   summary?: string;
-  source_type: "claude-session" | "claude-file" | "codex-session-index" | "codex-session-file";
+  source_type: "claude-session" | "claude-desktop-session" | "claude-file" | "codex-session-index" | "codex-session-file";
   status: "active" | "ended" | "unknown";
   updated_at: string;
   metadata?: Record<string, unknown>;

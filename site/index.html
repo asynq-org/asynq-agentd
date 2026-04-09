@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>asynq-agentd · local runtime for Asynq Buddy</title>
+    <title>asynq-agentd · local runtime for coding agents</title>
     <meta
       name="description"
-      content="Open-source local daemon and CLI for running Claude Code, Codex, and future agents behind Asynq Buddy."
+      content="Open-source local daemon and CLI for running Claude Code, Codex, and future coding agents on your own machine."
     />
     <meta name="robots" content="index,follow" />
     <link rel="canonical" href="https://agentd.asynq.org/" />
@@ -26,177 +26,265 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <div class="bg-blob bg-blob-1"></div>
+    <div class="bg-blob bg-blob-2"></div>
+    <div class="bg-blob bg-blob-3"></div>
+
     <main class="page">
+      <header class="topbar">
+        <a href="/" class="brand">
+          <span class="buddy-mark" aria-hidden="true">
+            <svg viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
+              <path class="buddy-ring" d="M160 32C230.692 32.0001 288 89.3077 288 160C288 186.756 279.787 211.593 265.75 232.133L231.172 197.554C237.099 186.343 240.457 173.564 240.457 160C240.457 115.565 204.435 79.543 160 79.543C115.565 79.543 79.543 115.565 79.543 160C79.543 204.435 115.565 240.457 160 240.457C173.564 240.457 186.343 237.099 197.554 231.172L232.133 265.75C211.593 279.787 186.756 288 160 288C89.3077 288 32.0001 230.692 32 160C32 89.3076 89.3076 32 160 32Z"/>
+              <path class="buddy-spark" d="M96 169.426C96 169.426 116.776 165.621 125.698 156.698C134.621 147.776 138.426 127 138.426 127C138.426 127 142.232 147.776 151.154 156.698C160.077 165.621 180.853 169.426 180.853 169.426C180.853 169.426 160.077 173.232 151.154 182.154C142.232 191.077 138.426 211.853 138.426 211.853C138.426 211.853 134.621 191.077 125.698 182.154C116.776 173.232 96 169.426 96 169.426Z"/>
+            </svg>
+          </span>
+          <span>asynq-agentd</span>
+        </a>
+        <nav class="topnav">
+          <a href="#install">Install</a>
+          <a href="#features">Features</a>
+          <a href="#buddy">Buddy</a>
+          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" rel="noopener noreferrer">API</a>
+          <a href="https://github.com/asynq-org/asynq-agentd" rel="noopener noreferrer" class="topnav-cta">GitHub →</a>
+        </nav>
+      </header>
+
       <section class="hero">
         <div class="hero-copy">
-          <p class="eyebrow">Open-source local-first agent runtime</p>
-          <h1>Run coding agents on your own machine. Use Buddy as the mobile control layer.</h1>
-          <p class="lede">
-            <strong>asynq-agentd</strong> is an open-source daemon and operator CLI for Claude Code, Codex, and future coding agents.
-            It handles task orchestration, approvals, recent-work continuity, recovery, and live operator surfaces on top of the machine you already trust. Asynq Buddy is the mobile-first operator experience built on top of this runtime.
-          </p>
-          <div class="hero-points">
-            <span>Local daemon</span>
-            <span>Task queue + approvals</span>
-            <span>Recent-work continuity</span>
-            <span>CLI, REST, SSE, WebSocket</span>
+          <div class="pill">
+            <span class="pill-dot"></span>
+            Open-source · Local-first · Apache 2.0
           </div>
+          <h1>The local runtime for your <span class="accent">coding agents</span>.</h1>
+          <p class="lede">
+            <code>asynq-agentd</code> is a small daemon and CLI that runs Claude Code, Codex, and future agents on your own machine. It handles sessions, approvals, recent-work continuity, and exposes a clean REST / SSE / WebSocket contract so you can build whatever operator surface you want on top.
+          </p>
           <div class="actions">
-            <a href="https://github.com/asynq-org/asynq-agentd" class="button button-primary">View on GitHub</a>
-            <a href="#buddy" class="button">Why Buddy exists</a>
-            <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" class="button">Usage examples</a>
-            <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" class="button">API contract</a>
+            <a href="https://github.com/asynq-org/asynq-agentd" rel="noopener noreferrer" class="button button-primary">
+              View on GitHub →
+            </a>
+            <a href="#install" class="button">Install</a>
+          </div>
+          <div class="hero-points">
+            <span>● Claude Code</span>
+            <span>● Codex</span>
+            <span>● REST + SSE + WebSocket</span>
+            <span>● macOS · Linux · Windows</span>
           </div>
         </div>
 
         <aside class="hero-shell" aria-label="Example operator workflow">
           <div class="shell-chrome">
             <span></span><span></span><span></span>
+            <em>asynq-agentctl</em>
           </div>
-          <pre><code>$ asynq-agentctl status
+          <pre><code><span class="sh-prompt">$</span> <span class="sh-cmd">asynq-agentctl status</span>
 {
-  "daemon": { "reachable": true },
-  "agents": [
-    { "id": "claude-code", "available": true },
-    { "id": "codex", "available": true }
+  <span class="sh-key">"daemon"</span>: { <span class="sh-key">"reachable"</span>: <span class="sh-val">true</span> },
+  <span class="sh-key">"agents"</span>: [
+    { <span class="sh-key">"id"</span>: <span class="sh-val">"claude-code"</span>, <span class="sh-key">"available"</span>: <span class="sh-val">true</span> },
+    { <span class="sh-key">"id"</span>: <span class="sh-val">"codex"</span>,       <span class="sh-key">"available"</span>: <span class="sh-val">true</span> }
   ],
-  "message": "Daemon is running with 2 sessions."
+  <span class="sh-key">"message"</span>: <span class="sh-val">"Daemon running with 2 sessions."</span>
 }
 
-$ asynq-agentctl approvals
+<span class="sh-prompt">$</span> <span class="sh-cmd">asynq-agentctl approvals</span>
 [
   {
-    "title": "Refactor payments API",
-    "action": "modify 12 files",
-    "next_action": "approve_or_reject"
+    <span class="sh-key">"title"</span>: <span class="sh-val">"Refactor payments API"</span>,
+    <span class="sh-key">"action"</span>: <span class="sh-val">"modify 12 files"</span>,
+    <span class="sh-key">"next"</span>: <span class="sh-val">"approve_or_reject"</span>
   }
 ]</code></pre>
         </aside>
       </section>
 
-      <section class="stats-band">
-        <div>
-          <strong>Claude Code + Codex</strong>
-          <span>real adapters today</span>
+      <section class="install" id="install">
+        <div class="install-head">
+          <p class="eyebrow">Install</p>
+          <h2>One line. Any machine.</h2>
         </div>
-        <div>
-          <strong>REST + SSE + WebSocket</strong>
-          <span>ready for custom dashboards</span>
+        <div class="install-grid">
+          <div class="install-card">
+            <div class="install-label">macOS · Linux</div>
+            <pre><code>curl -fsSL https://agentd.asynq.org/install.sh | sh</code></pre>
+          </div>
+          <div class="install-card">
+            <div class="install-label">Windows</div>
+            <pre><code>irm https://agentd.asynq.org/install.ps1 | iex</code></pre>
+          </div>
         </div>
-        <div>
-          <strong>Approvals + recovery</strong>
-          <span>built into the runtime layer</span>
+        <p class="install-note">
+          The installer clones the repo into a temp directory, builds from source, and sets up Tailscale-aware pairing. No background telemetry.
+        </p>
+      </section>
+
+      <section class="features" id="features">
+        <div class="section-head">
+          <p class="eyebrow">What it does</p>
+          <h2>More than a remote control.</h2>
+          <p class="section-lede">
+            agentd sits below the UI layer. It is the runtime, contract, and operator layer for local coding agents.
+          </p>
         </div>
-        <div>
-          <strong>Buddy-compatible backend</strong>
-          <span>powers observed sessions, reviews, and managed takeovers</span>
+
+        <div class="feature-grid">
+          <article class="card">
+            <div class="card-icon">◎</div>
+            <h3>Session runtime</h3>
+            <p>
+              Runs Claude Code and Codex locally. Manages tasks, dependencies, approvals, and restart recovery out of the box.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◐</div>
+            <h3>Recent-work memory</h3>
+            <p>
+              Indexes recent sessions from Claude and Codex so you can pick up where you left off without re-prompting.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◇</div>
+            <h3>Clean contract</h3>
+            <p>
+              REST, SSE, and WebSocket endpoints for overview, attention-required, and continue-working cards. Build your own UI on top.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◈</div>
+            <h3>CLI-first operator</h3>
+            <p>
+              <code>asynq-agentctl</code> inspects agents, sessions, approvals, pairing, and dashboard cards without dropping to raw curl.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">◉</div>
+            <h3>Local-first by default</h3>
+            <p>
+              Your code and prompts never leave the machine. Pairing happens over your own tailnet, not through a hosted relay.
+            </p>
+          </article>
+          <article class="card">
+            <div class="card-icon">✦</div>
+            <h3>Buddy-compatible</h3>
+            <p>
+              The same contract that powers <code>asynq-agentctl</code> powers Asynq Buddy. Ship your own surface or use the mobile app.
+            </p>
+          </article>
         </div>
       </section>
 
-      <section class="grid">
-        <article class="card">
-          <h3>It is not just remote control</h3>
+      <section class="buddy-promo" id="buddy">
+        <div class="buddy-promo-copy">
+          <p class="eyebrow accent-eyebrow">Built on top of agentd</p>
+          <h2>Prefer a polished mobile app? Meet <span class="buddy-word">Buddy</span>.</h2>
           <p>
-            `asynq-agentd` sits below the UI layer. It is a local runtime that manages sessions, tasks, approvals, recent work, terminal streams, and restart recovery.
+            Asynq Buddy is the mobile operator experience built on this runtime. Review, approve, and steer your local agents from the couch, the café, or the subway - without going back to your desk.
           </p>
-        </article>
-        <article class="card">
-          <h3>Built for dashboards later</h3>
-          <p>
-            The daemon already exposes dashboard-oriented endpoints for overview, attention-required, and continue-working cards. That same contract powers Asynq Buddy and can support other operator surfaces too.
-          </p>
-        </article>
-        <article class="card">
-          <h3>Open-source by design</h3>
-          <p>
-            The runtime stays open and local-first. The future Buddy product is the polished operator experience on top: better UX, mobile workflows, pairing, and presence-aware notifications.
-          </p>
-        </article>
-      </section>
-
-      <section class="panel split" id="buddy">
-        <div>
-          <p class="eyebrow">Why there are two layers</p>
-          <h2><code>asynq-agentd</code> stays open. Buddy focuses on operator UX.</h2>
-          <p>
-            The split is intentional. <strong>asynq-agentd</strong> is the local runtime, CLI, and contract layer.
-            <strong> Asynq Buddy</strong> is the mobile-first product layer on top: observed views, managed follow-ups,
-            pairing, and a calmer approval workflow away from the terminal.
-          </p>
-        </div>
-        <div class="callout">
-          <p class="eyebrow">Buddy flow</p>
-          <h3>See. Decide. Take over.</h3>
-          <p>
-            Buddy is aimed at developers who want visibility into local agent work first, and remote control only when a session truly needs a human.
-          </p>
-        </div>
-      </section>
-
-      <section class="panel split">
-        <div>
-          <p class="eyebrow">What it already does</p>
-          <h2>Current runtime capabilities</h2>
-          <ul class="feature-list">
-            <li>Runs Claude Code and Codex through a local daemon</li>
-            <li>Queues tasks, dependencies, approvals, and recurring jobs</li>
-            <li>Indexes recent work from Claude and Codex and can continue it</li>
-            <li>Exposes REST, SSE, and WebSocket operator surfaces</li>
-            <li>Streams terminal chunks and accepts simple live control messages</li>
-            <li>Ships with a local CLI plus bootstrap installers for macOS, Linux, and Windows</li>
+          <ul class="buddy-list">
+            <li>See every session on your phone in real time</li>
+            <li>One-tap approvals when an agent stalls</li>
+            <li>Take over from the phone, keep the context</li>
+            <li>Pairs over your own tailnet, nothing leaves your Mac</li>
           </ul>
+          <div class="actions">
+            <a href="https://buddy.asynq.org" class="button button-primary">
+              Try Asynq Buddy →
+            </a>
+            <a href="https://discord.gg/fE3qh2cRDT" rel="noopener noreferrer" target="_blank" class="button">Join Discord</a>
+          </div>
+          <p class="buddy-note">Public alpha · Free while it lasts</p>
         </div>
-        <div class="callout">
-          <p class="eyebrow">Best fit today</p>
-          <h3>Who is this for?</h3>
-          <p>
-            Developers who want a trustworthy local daemon for coding agents, plus teams that want an open backend contract they can wire into their own dashboards before a full hosted product exists.
-          </p>
+
+        <div class="buddy-phone-wrap">
+          <div class="phone">
+            <div class="phone-notch"></div>
+            <div class="phone-screen">
+              <div class="phone-statusbar">
+                <span>9:41</span>
+                <span>●●●</span>
+              </div>
+              <div class="phone-title">Overview</div>
+              <div class="phone-card">
+                <div class="phone-card-row">
+                  <div>
+                    <strong>Asynq Buddy</strong>
+                    <span>Connected via Tailscale</span>
+                  </div>
+                  <div class="phone-pill">2 runtimes</div>
+                </div>
+                <div class="phone-card-body">Detected: Claude Code, Codex</div>
+              </div>
+              <div class="phone-metrics">
+                <div class="phone-metric">
+                  <div class="phone-metric-icon blue">◎</div>
+                  <div class="phone-metric-value">10</div>
+                  <div class="phone-metric-label">Sessions</div>
+                </div>
+                <div class="phone-metric">
+                  <div class="phone-metric-icon orange">!</div>
+                  <div class="phone-metric-value">2</div>
+                  <div class="phone-metric-label">Reviews</div>
+                </div>
+                <div class="phone-metric">
+                  <div class="phone-metric-icon green">◐</div>
+                  <div class="phone-metric-value">1</div>
+                  <div class="phone-metric-label">Working</div>
+                </div>
+              </div>
+              <div class="phone-eyebrow">Attention required</div>
+              <div class="phone-card">
+                <div class="phone-card-row">
+                  <div>
+                    <strong>refactor/auth-flow</strong>
+                    <span>Claude · 2m ago</span>
+                  </div>
+                </div>
+                <div class="phone-card-body">Approve dropping the legacy JWT helper.</div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section class="panel code-panel">
-        <h2>Install</h2>
-        <pre><code>curl -fsSL https://agentd.asynq.org/install.sh | sh</code></pre>
-        <pre><code>irm https://agentd.asynq.org/install.ps1 | iex</code></pre>
-        <p class="muted">
-          Today the hosted entrypoints are thin wrappers: they clone the repo into a temporary directory and run the real bootstrap installer from source. Tailscale-aware onboarding is included in the installer flow.
-        </p>
-      </section>
-
-      <section class="grid two-up">
-        <article class="card">
-          <p class="eyebrow">Read the contract</p>
-          <h3>HTTP, SSE, and WebSocket API</h3>
-          <p>
-            The daemon already exposes enough contract surface to build dashboards, operator tooling, or your own UI on top of it.
-          </p>
-          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" class="text-link">Read API contract</a>
-        </article>
-        <article class="card">
-          <p class="eyebrow">Use it today</p>
-          <h3>CLI-first operator workflow</h3>
-          <p>
-            `asynq-agentctl` can already inspect agents, sessions, approvals, recent work, pairing, dashboard cards, and auth tokens without dropping to raw curl for common tasks.
-          </p>
-          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" class="text-link">Read usage examples</a>
-        </article>
-      </section>
-
-      <section class="panel">
-        <p class="eyebrow">Open-source scope</p>
-        <h2>The split is intentional</h2>
-        <p>
-          <strong>asynq-agentd</strong> is the daemon, runtime contract, and local operator layer.
-          <strong> Asynq Buddy</strong> is the future product experience built on top of it.
-          That split keeps the runtime open, inspectable, and useful on its own while the higher-level UI evolves separately.
-        </p>
+      <section class="docs-grid">
+        <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" rel="noopener noreferrer" class="doc-card">
+          <p class="eyebrow">Docs</p>
+          <h3>API contract →</h3>
+          <p>HTTP, SSE, and WebSocket endpoints. Enough to build dashboards or custom operator tooling on top.</p>
+        </a>
+        <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/usage.md" rel="noopener noreferrer" class="doc-card">
+          <p class="eyebrow">Docs</p>
+          <h3>Usage examples →</h3>
+          <p>How to inspect agents, sessions, approvals, pairing, and recent work from the CLI.</p>
+        </a>
+        <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/architecture.md" rel="noopener noreferrer" class="doc-card">
+          <p class="eyebrow">Docs</p>
+          <h3>Architecture →</h3>
+          <p>How the daemon, CLI, session runtime, and contract layer fit together.</p>
+        </a>
       </section>
 
       <footer class="site-footer">
-        <p>
-          Maintained by <a href="https://asynq.org/" rel="noopener noreferrer">Asynq.org</a>.
-        </p>
+        <div class="footer-brand">
+          <span class="buddy-mark small" aria-hidden="true">
+            <svg viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
+              <path class="buddy-ring" d="M160 32C230.692 32.0001 288 89.3077 288 160C288 186.756 279.787 211.593 265.75 232.133L231.172 197.554C237.099 186.343 240.457 173.564 240.457 160C240.457 115.565 204.435 79.543 160 79.543C115.565 79.543 79.543 115.565 79.543 160C79.543 204.435 115.565 240.457 160 240.457C173.564 240.457 186.343 237.099 197.554 231.172L232.133 265.75C211.593 279.787 186.756 288 160 288C89.3077 288 32.0001 230.692 32 160C32 89.3076 89.3076 32 160 32Z"/>
+              <path class="buddy-spark" d="M96 169.426C96 169.426 116.776 165.621 125.698 156.698C134.621 147.776 138.426 127 138.426 127C138.426 127 142.232 147.776 151.154 156.698C160.077 165.621 180.853 169.426 180.853 169.426C180.853 169.426 160.077 173.232 151.154 182.154C142.232 191.077 138.426 211.853 138.426 211.853C138.426 211.853 134.621 191.077 125.698 182.154C116.776 173.232 96 169.426 96 169.426Z"/>
+            </svg>
+          </span>
+          <span>asynq-agentd</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/asynq-org/asynq-agentd" rel="noopener noreferrer">GitHub</a>
+          <a href="https://buddy.asynq.org" rel="noopener noreferrer">Buddy</a>
+          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/docs/api.md" rel="noopener noreferrer">API</a>
+          <a href="https://github.com/asynq-org/asynq-agentd/blob/main/LICENSE" rel="noopener noreferrer">License</a>
+        </div>
+        <div class="footer-meta">
+          Maintained by <a href="https://asynq.org/">Asynq Labs</a> · Apache 2.0 licensed
+        </div>
       </footer>
     </main>
   </body>

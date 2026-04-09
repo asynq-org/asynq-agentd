@@ -10,7 +10,23 @@ import { RecentWorkService } from "./recent-work-service.ts";
 import { DashboardService } from "./dashboard-service.ts";
 import { SummaryService } from "./summary-service.ts";
 import { RuntimeDiscoveryService } from "./runtime-discovery-service.ts";
+import { UpdateService } from "./update-service.ts";
 import { createDefaultConfig } from "../config.ts";
+
+function createTestUpdates() {
+  return new UpdateService({
+    fetchImpl: async () => new Response(JSON.stringify({
+      tag_name: "v0.4.0",
+      html_url: "https://example.com/releases/v0.4.0",
+      body: "Current release",
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+      },
+    }),
+  });
+}
 
 test("dashboard service returns overview, attention cards, and continue items", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
@@ -46,6 +62,7 @@ test("dashboard service returns overview, attention cards, and continue items", 
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   const task = tasks.create({
@@ -160,6 +177,7 @@ test("dashboard service uses cached model-backed continue summaries when availab
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -192,6 +210,58 @@ test("dashboard service uses cached model-backed continue summaries when availab
   rmSync(root, { recursive: true, force: true });
 });
 
+test("dashboard service includes Claude Cowork observed sessions in continue working", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-cowork-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    claudeDesktopPath: join(root, "missing-claude-desktop"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+  });
+
+  storage.upsertRecentWork({
+    id: "cowork_1",
+    source_path: "/tmp/cowork/local_session.json",
+    project_path: "/tmp/demo",
+    title: "Redesign landing page for startup",
+    summary: "Please look at async-buddy/apps/web and redesign the landing page for Buddy.",
+    source_type: "claude-desktop-session",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      runtime_label: "Claude Cowork",
+      last_user_message: "Please look at async-buddy/apps/web and redesign the landing page for Buddy.",
+    },
+  });
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "cowork_1");
+
+  assert.ok(observed);
+  assert.equal(observed?.source_type, "claude-desktop-session");
+  assert.equal(observed?.title, "Redesign landing page for startup");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("dashboard service hides managed runtime transcripts from continue working", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
@@ -214,6 +284,7 @@ test("dashboard service hides managed runtime transcripts from continue working"
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   const task = tasks.create({
@@ -285,6 +356,7 @@ test("dashboard service hides internal Codex artifact sessions from continue wor
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -360,6 +432,7 @@ test("dashboard service inherits observed linkage through managed continuation c
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -440,6 +513,7 @@ test("dashboard service exposes observed Codex approval requests in attention re
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -505,6 +579,7 @@ test("dashboard service suppresses observed approval once a managed takeover exi
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -574,6 +649,7 @@ test("dashboard service keeps a newer observed approval visible despite an older
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -630,6 +706,72 @@ test("dashboard service keeps a newer observed approval visible despite an older
   rmSync(root, { recursive: true, force: true });
 });
 
+test("dashboard service hides stale linked managed takeover once observed work is newer", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-stale-takeover-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    claudeDesktopPath: join(root, "missing-claude-desktop"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed",
+    source_path: "/tmp/recent.jsonl",
+    project_path: "/tmp/demo",
+    title: "Correct observed session timestamps",
+    summary: "Observed work continued after the failed takeover.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: "2026-04-07T12:05:00.000Z",
+    metadata: {},
+  });
+
+  const task = tasks.create({
+    title: "Continue: Correct observed session timestamps",
+    description: "Take over the observed session.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+    context: {
+      source_recent_work_id: "recent_observed",
+    },
+  });
+  storage.upsertTask({
+    ...task,
+    status: "failed",
+    updated_at: "2026-03-28T02:24:00.000Z",
+  });
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_observed");
+  const detail = dashboard.getRecentWorkDetail("recent_observed");
+
+  assert.ok(observed);
+  assert.equal(observed?.linked_managed_session_id, undefined);
+  assert.equal(observed?.linked_managed_status, undefined);
+  assert.equal(detail?.takeover, undefined);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("dashboard service filters noisy and duplicate continue items", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
@@ -653,6 +795,7 @@ test("dashboard service filters noisy and duplicate continue items", () => {
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -745,6 +888,7 @@ test("dashboard service refreshes recent-work detail from disk before returning 
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   const sessionDir = join(codexPath, "sessions", "2026", "03", "24");
@@ -794,6 +938,7 @@ test("dashboard service marks observed approvals outside the workspace as deskto
     recentWork,
     summaries,
     runtimes,
+    updates: createTestUpdates(),
   });
 
   storage.upsertRecentWork({
@@ -832,6 +977,69 @@ test("dashboard service marks observed approvals outside the workspace as deskto
   assert.equal(detail?.review?.takeover_supported, false);
   assert.equal(detail?.review?.show_stats, false);
   assert.match(detail?.review?.takeover_reason ?? "", /outside the managed workspace/i);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service exposes agentd and Buddy compatibility updates in attention required", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const updates = new UpdateService({
+    currentVersion: "0.4.0",
+    minSupportedBuddyVersion: "0.2.0",
+    fetchImpl: async () => new Response(JSON.stringify({
+      tag_name: "v0.5.0",
+      html_url: "https://example.com/releases/v0.5.0",
+      body: "New release with update support.",
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+      },
+    }),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates,
+  });
+
+  await updates.checkNow();
+  const attention = dashboard.getAttentionRequired({
+    app_version: "0.1.0",
+    min_supported_agentd_version: "0.5.0",
+  });
+
+  assert.equal(attention.items.length, 3);
+  assert.equal(attention.items[0]?.approval_id, "update:buddy");
+  assert.equal(attention.items[1]?.approval_id, "update:agentd-compatibility");
+  assert.equal(attention.items[2]?.approval_id, "update:agentd");
+  assert.equal(attention.items[2]?.update?.latest_version, "0.5.0");
+
+  const overview = dashboard.getOverview({
+    app_version: "0.1.0",
+    min_supported_agentd_version: "0.5.0",
+  });
+  assert.equal(overview.counts.approvals_pending, 3);
+  assert.equal(overview.compatibility?.requires_buddy_update, true);
+  assert.equal(overview.compatibility?.requires_agentd_update, true);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

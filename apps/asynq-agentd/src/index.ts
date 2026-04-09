@@ -18,6 +18,7 @@ import { createDaemonServer } from "./http/server.ts";
 import { RuntimeDiscoveryService } from "./services/runtime-discovery-service.ts";
 import { SummaryService } from "./services/summary-service.ts";
 import { initializeLogger } from "./logger.ts";
+import { UpdateService } from "./services/update-service.ts";
 
 const port = Number(process.env.PORT ?? 7433);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -53,12 +54,14 @@ const adapters = new Map([
 const scheduler = new SchedulerService(storage, tasks, sessions, config, adapters, undefined, undefined, terminalStreams);
 const recentWork = new RecentWorkService(storage, tasks, {
   claudePath: runtimePaths.claudePath,
+  claudeDesktopPath: runtimePaths.claudeDesktopPath,
   codexPath: runtimePaths.codexPath,
   events: liveEvents,
   onRecentWorkBatchUpdated: (records) => {
     summaries.prepareContinueCards(records);
   },
 });
+const updates = new UpdateService();
 const dashboard = new DashboardService({
   storage,
   tasks,
@@ -66,6 +69,7 @@ const dashboard = new DashboardService({
   recentWork,
   summaries,
   runtimes,
+  updates,
 });
 const activeConfig = config.get();
 const envTlsEnabled = process.env.ASYNQ_AGENTD_TLS_ENABLED === "1";
@@ -91,6 +95,7 @@ const server = createDaemonServer({
   liveEvents,
   terminalStreams,
   dashboard,
+  updates,
 }, {
   enabled: tlsEnabled,
   certPath: tlsCertPath,
@@ -109,6 +114,7 @@ server.on("error", (error) => {
 server.listen(port, host, () => {
   writeAuthFile(runtimePaths, activeConfig);
   scheduler.start(500);
+  updates.start();
   recentWork.startWatching();
   console.log(`asynq-agentd listening on ${scheme}://${host}:${port}`);
   console.log(`runtime db: ${runtimePaths.dbPath}`);
@@ -121,6 +127,7 @@ server.listen(port, host, () => {
 
 process.on("SIGINT", () => {
   scheduler.stop();
+  updates.stop();
   recentWork.stopWatching();
   server.close(() => {
     storage.close();
@@ -130,6 +137,7 @@ process.on("SIGINT", () => {
 
 process.on("SIGTERM", () => {
   scheduler.stop();
+  updates.stop();
   recentWork.stopWatching();
   server.close(() => {
     storage.close();

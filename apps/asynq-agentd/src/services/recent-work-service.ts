@@ -20,6 +20,7 @@ const IGNORED_FILE_NAMES = new Set(["settings.json"]);
 const MAX_FULL_CODEX_SESSION_BYTES = 4 * 1024 * 1024;
 const CODEX_SESSION_HEAD_BYTES = 256 * 1024;
 const CODEX_SESSION_TAIL_BYTES = 1024 * 1024;
+const CLAUDE_DESKTOP_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
 
 interface ClaudeSessionMeta {
   pid: number;
@@ -48,6 +49,7 @@ interface ClaudeTranscriptEntry {
 
 interface RecentWorkServiceOptions {
   claudePath: string;
+  claudeDesktopPath?: string;
   codexPath: string;
   events?: EventStreamService;
   onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
@@ -60,10 +62,24 @@ interface PendingCodexCommand {
   approvalRequest?: Extract<ActivityPayload, { type: "approval_requested" }>;
 }
 
+interface ClaudeDesktopSessionMeta {
+  sessionId: string;
+  title?: string;
+  initialMessage?: string;
+  updatedAt: string;
+  lastActivityAtMs?: number;
+  createdAt?: string;
+  projectPath?: string;
+  model?: string;
+  isArchived: boolean;
+  sourcePath: string;
+}
+
 export class RecentWorkService {
   private readonly storage: AsynqAgentdStorage;
   private readonly tasks: TaskService;
   private readonly claudePath: string;
+  private readonly claudeDesktopPath: string;
   private readonly codexPath: string;
   private readonly events?: EventStreamService;
   private readonly onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
@@ -76,6 +92,7 @@ export class RecentWorkService {
     this.storage = storage;
     this.tasks = tasks;
     this.claudePath = options.claudePath;
+    this.claudeDesktopPath = options.claudeDesktopPath ?? "";
     this.codexPath = options.codexPath;
     this.events = options.events;
     this.onRecentWorkUpdated = options.onRecentWorkUpdated;
@@ -126,6 +143,20 @@ export class RecentWorkService {
       }
     }
 
+    if (this.claudeDesktopPath && existsSync(this.claudeDesktopPath)) {
+      for (const record of this.scanClaudeDesktop()) {
+        const previous = this.storage.getRecentWork(record.id);
+        const merged = this.mergeWithPreviousRecord(record, previous);
+        this.storage.upsertRecentWork(merged);
+        if (this.didRecentWorkChange(previous, merged)) {
+          this.publishRecentWorkUpdate(merged, previous);
+          this.onRecentWorkUpdated?.(merged);
+          changed.push(merged);
+        }
+        discovered.push(merged);
+      }
+    }
+
     if (existsSync(this.codexPath)) {
       for (const record of this.scanCodex()) {
         const previous = this.storage.getRecentWork(record.id);
@@ -159,7 +190,7 @@ export class RecentWorkService {
       this.scan();
     }, 5000);
 
-    for (const rootPath of [this.claudePath, this.codexPath]) {
+    for (const rootPath of [this.claudePath, this.claudeDesktopPath, this.codexPath]) {
       if (!existsSync(rootPath)) {
         continue;
       }
@@ -394,6 +425,119 @@ export class RecentWorkService {
     }
 
     return records;
+  }
+
+  private scanClaudeDesktop(): RecentWorkRecord[] {
+    const sessionsRoot = join(this.claudeDesktopPath, "local-agent-mode-sessions");
+    if (!existsSync(sessionsRoot)) {
+      return [];
+    }
+
+    const records: RecentWorkRecord[] = [];
+    for (const filePath of this.walk(sessionsRoot, 6)) {
+      if (!basename(filePath).startsWith("local_") || extname(filePath) !== ".json") {
+        continue;
+      }
+
+      const record = this.parseClaudeDesktopSession(filePath);
+      if (record) {
+        records.push(record);
+      }
+    }
+
+    return records;
+  }
+
+  private parseClaudeDesktopSession(filePath: string): RecentWorkRecord | undefined {
+    const text = readFileSync(filePath, "utf8").trim();
+    if (!text) {
+      return undefined;
+    }
+
+    const payload = parseJsonSafe<Record<string, unknown>>(text, {});
+    const meta = this.extractClaudeDesktopSessionMeta(payload, filePath);
+    if (!meta) {
+      return undefined;
+    }
+
+    const title = this.pickString(meta.title, meta.initialMessage) ?? basename(filePath, ".json");
+    const summary = this.compactClaudeDesktopSummary(meta.initialMessage);
+
+    const isFreshlyActive = !meta.isArchived
+      && typeof meta.lastActivityAtMs === "number"
+      && Date.now() - meta.lastActivityAtMs <= CLAUDE_DESKTOP_ACTIVE_WINDOW_MS;
+
+    return {
+      id: meta.sessionId,
+      source_path: meta.sourcePath,
+      project_path: meta.projectPath,
+      title,
+      summary,
+      source_type: "claude-desktop-session",
+      status: isFreshlyActive ? "active" : "ended",
+      updated_at: meta.updatedAt,
+      metadata: {
+        thread_name: meta.title,
+        summary_title: meta.title,
+        runtime_label: "Claude Cowork",
+        model: meta.model,
+        raw_user_input: meta.initialMessage,
+        last_user_message: meta.initialMessage,
+        started_at: meta.createdAt,
+        last_activity_at: meta.updatedAt,
+        is_archived: meta.isArchived,
+      },
+    };
+  }
+
+  private extractClaudeDesktopSessionMeta(
+    payload: Record<string, unknown>,
+    filePath: string,
+  ): ClaudeDesktopSessionMeta | undefined {
+    const sessionId = this.pickString(payload.sessionId);
+    if (!sessionId) {
+      return undefined;
+    }
+
+    const lastActivityAt = typeof payload.lastActivityAt === "number"
+      ? new Date(payload.lastActivityAt).toISOString()
+      : statSync(filePath).mtime.toISOString();
+    const createdAt = typeof payload.createdAt === "number"
+      ? new Date(payload.createdAt).toISOString()
+      : undefined;
+    const userSelectedFolders = Array.isArray(payload.userSelectedFolders)
+      ? payload.userSelectedFolders
+      : [];
+    const projectPath = userSelectedFolders
+      .map((value) => this.pickString(value))
+      .find((value): value is string => Boolean(value));
+
+    return {
+      sessionId,
+      title: this.pickString(payload.title),
+      initialMessage: this.pickString(payload.initialMessage),
+      updatedAt: lastActivityAt,
+      lastActivityAtMs: typeof payload.lastActivityAt === "number" ? payload.lastActivityAt : undefined,
+      createdAt,
+      projectPath,
+      model: this.pickString(payload.model),
+      isArchived: Boolean(payload.isArchived),
+      sourcePath: filePath,
+    };
+  }
+
+  private compactClaudeDesktopSummary(value?: string): string | undefined {
+    const text = this.pickString(value);
+    if (!text) {
+      return undefined;
+    }
+
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (normalized.length <= 220) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, 217).trimEnd()}...`;
   }
 
   private parseClaudeSessionMeta(filePath: string): ClaudeSessionMeta | undefined {
