@@ -1,4 +1,23 @@
-export const AGENTD_VERSION = "0.4.0";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+function detectAgentdVersion(): string {
+  try {
+    const sourceDir = dirname(fileURLToPath(import.meta.url));
+    const packageJsonPath = resolve(sourceDir, "..", "package.json");
+    const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version?: string };
+    if (typeof pkg.version === "string" && pkg.version.trim().length > 0) {
+      return pkg.version.trim();
+    }
+  } catch {
+    // Fall through to conservative static fallback.
+  }
+
+  return "0.4.0";
+}
+
+export const AGENTD_VERSION = detectAgentdVersion();
 export const MIN_SUPPORTED_BUDDY_VERSION = "0.1.0";
 export const DEFAULT_GITHUB_RELEASES_URL = "https://api.github.com/repos/asynq-org/asynq-agentd/releases/latest";
 export const DEFAULT_INSTALL_COMMAND = "curl -fsSL https://agentd.asynq.org/install.sh | sh -s -- --reuse-config --non-interactive --skip-pairing";

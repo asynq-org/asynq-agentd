@@ -84,6 +84,20 @@ function truncateReleaseNotes(body: string | undefined, maxLength = 1600): strin
     : `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+function buildReleaseRef(version: string | undefined): string | undefined {
+  const sanitized = sanitizeVersion(version);
+  if (!sanitized) {
+    return undefined;
+  }
+
+  // Keep this strict to avoid shell injection when used in command env assignment.
+  if (!/^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z.-]+)?$/.test(sanitized)) {
+    return undefined;
+  }
+
+  return `v${sanitized}`;
+}
+
 type PullRequestLink = {
   owner: string;
   repo: string;
@@ -350,12 +364,21 @@ export class UpdateService {
     };
 
     try {
-      await this.runCommand(this.installCommand);
+      const releaseRef = buildReleaseRef(this.status.latest_version);
+      const installCommand = releaseRef
+        ? `ASYNQ_AGENTD_REF=${releaseRef} ${this.installCommand}`
+        : this.installCommand;
+      await this.runCommand(installCommand);
       this.status = {
         ...this.status,
         status: "restarting",
       };
-      await this.runCommand(this.restartCommand);
+      try {
+        await this.runCommand(this.restartCommand);
+      } catch {
+        // Best-effort recovery for environments where restart is unsupported but start works.
+        await this.runCommand("asynq-agentctl start");
+      }
       return this.getStatus();
     } catch (error) {
       this.status = {

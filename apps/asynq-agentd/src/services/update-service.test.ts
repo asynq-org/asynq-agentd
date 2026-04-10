@@ -113,3 +113,36 @@ test("update service parses structured notes from linked pull requests", async (
   assert.match(status.release_notes ?? "", /Patch Changes/i);
   assert.match(status.release_notes ?? "", /pull\/5/i);
 });
+
+test("install update pins release ref and falls back to start when restart fails", async () => {
+  const commands: string[] = [];
+  const updates = new UpdateService({
+    currentVersion: "0.4.0",
+    installCommand: "install-command",
+    restartCommand: "asynq-agentctl restart",
+    fetchImpl: async () => new Response(JSON.stringify({
+      tag_name: "v0.4.4",
+      html_url: "https://example.com/releases/v0.4.4",
+      body: "Patch release.",
+    }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+      },
+    }),
+    runCommand: async (command) => {
+      commands.push(command);
+      if (command === "asynq-agentctl restart") {
+        throw new Error("restart unsupported");
+      }
+    },
+  });
+
+  const status = await updates.installUpdate();
+  assert.equal(status.status, "restarting");
+  assert.deepEqual(commands, [
+    "ASYNQ_AGENTD_REF=v0.4.4 install-command",
+    "asynq-agentctl restart",
+    "asynq-agentctl start",
+  ]);
+});
