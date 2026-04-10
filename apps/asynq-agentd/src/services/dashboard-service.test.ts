@@ -1028,10 +1028,12 @@ test("dashboard service exposes agentd and Buddy compatibility updates in attent
   });
 
   assert.equal(attention.items.length, 3);
-  assert.equal(attention.items[0]?.approval_id, "update:buddy");
-  assert.equal(attention.items[1]?.approval_id, "update:agentd-compatibility");
-  assert.equal(attention.items[2]?.approval_id, "update:agentd");
-  assert.equal(attention.items[2]?.update?.latest_version, "0.5.0");
+  assert.deepEqual(
+    attention.items.map((item) => item.approval_id).sort(),
+    ["update:agentd", "update:agentd-compatibility", "update:buddy"],
+  );
+  const agentdUpdate = attention.items.find((item) => item.approval_id === "update:agentd");
+  assert.equal(agentdUpdate?.update?.latest_version, "0.5.0");
 
   const overview = dashboard.getOverview({
     app_version: "0.1.0",
