@@ -21,8 +21,8 @@ mkdir -p "$(dirname "$CHECKOUT_DIR")"
 if [ -d "$CHECKOUT_DIR/.git" ]; then
   echo "Updating existing checkout..."
   git -C "$CHECKOUT_DIR" fetch --depth 1 origin "$REF"
-  git -C "$CHECKOUT_DIR" checkout -f "$REF"
-  git -C "$CHECKOUT_DIR" reset --hard "origin/$REF"
+  git -C "$CHECKOUT_DIR" checkout -f FETCH_HEAD
+  git -C "$CHECKOUT_DIR" reset --hard FETCH_HEAD
 else
   rm -rf "$CHECKOUT_DIR"
   git clone --depth 1 --branch "$REF" "$REPO_URL" "$CHECKOUT_DIR"
