@@ -1,7 +1,7 @@
 export const AGENTD_VERSION = "0.4.0";
 export const MIN_SUPPORTED_BUDDY_VERSION = "0.1.0";
 export const DEFAULT_GITHUB_RELEASES_URL = "https://api.github.com/repos/asynq-org/asynq-agentd/releases/latest";
-export const DEFAULT_INSTALL_COMMAND = "curl -fsSL https://agentd.asynq.org/install.sh | sh";
+export const DEFAULT_INSTALL_COMMAND = "curl -fsSL https://agentd.asynq.org/install.sh | sh -s -- --reuse-config --non-interactive --skip-pairing";
 export const DEFAULT_RESTART_COMMAND = "asynq-agentctl restart";
 
 function normalize(version: string): number[] {

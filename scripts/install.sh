@@ -9,6 +9,10 @@ SERVICE_CHOICE_DEFAULT="user"
 PUBLIC_URL_DEFAULT="http://127.0.0.1:7433"
 HOST_BIND_DEFAULT="127.0.0.1"
 PORT_DEFAULT="7433"
+ACCESS_MODE_DEFAULT="tailscale"
+TAILSCALE_ONBOARDING_DEFAULT="auto"
+REUSE_CONFIG=0
+SKIP_PAIRING=0
 
 if ! command -v node >/dev/null 2>&1; then
   echo "error: node is required but was not found on PATH" >&2
@@ -19,6 +23,37 @@ if ! command -v pnpm >/dev/null 2>&1; then
   echo "error: pnpm is required but was not found on PATH" >&2
   exit 1
 fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --reuse-config)
+      REUSE_CONFIG=1
+      ;;
+    --non-interactive)
+      ASYNQ_AGENTD_NONINTERACTIVE=1
+      export ASYNQ_AGENTD_NONINTERACTIVE
+      ;;
+    --skip-pairing)
+      SKIP_PAIRING=1
+      ;;
+    --install-dir)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --install-dir requires a value" >&2; exit 1; }
+      INSTALL_DIR_DEFAULT=$1
+      ;;
+    --runtime-home)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --runtime-home requires a value" >&2; exit 1; }
+      RUNTIME_HOME_DEFAULT=$1
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      echo "usage: ./scripts/install.sh [--reuse-config] [--non-interactive] [--skip-pairing] [--install-dir <path>] [--runtime-home <path>]" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
 
 read_workspace_version() {
   node -e '
@@ -501,8 +536,80 @@ ensure_tailscale_ready() {
   esac
 }
 
+detect_service_choice_default() {
+  uname_s=$(uname -s)
+  if [ "$uname_s" = "Darwin" ] && [ -f "${HOME}/Library/LaunchAgents/org.asynq.asynq-agentd.plist" ]; then
+    printf 'user'
+    return
+  fi
+
+  if [ "$uname_s" = "Linux" ] && [ -f "${HOME}/.config/systemd/user/asynq-agentd.service" ]; then
+    printf 'user'
+    return
+  fi
+
+  printf 'none'
+}
+
+infer_access_mode_from_config() {
+  host=$1
+  public_url=$2
+
+  if [ "$host" = "127.0.0.1" ]; then
+    printf 'local'
+    return
+  fi
+
+  case "$public_url" in
+    *".ts.net:"*|*"tail"*".ts.net:"*)
+      printf 'tailscale'
+      return
+      ;;
+    *)
+      printf 'custom'
+      return
+      ;;
+  esac
+}
+
+if command -v asynq-agentd >/dev/null 2>&1; then
+  detected_install_dir=$(dirname "$(command -v asynq-agentd)")
+  if [ -n "${detected_install_dir:-}" ]; then
+    INSTALL_DIR_DEFAULT=$detected_install_dir
+  fi
+fi
+
+if [ "$REUSE_CONFIG" = "1" ]; then
+  existing_env_file=""
+  for candidate in \
+    "${ASYNQ_AGENTD_ENV_FILE:-}" \
+    "$RUNTIME_HOME_DEFAULT/asynq-agentd.env" \
+    "${HOME}/.asynq-agentd/asynq-agentd.env"
+  do
+    if [ -n "${candidate:-}" ] && [ -f "$candidate" ]; then
+      existing_env_file=$candidate
+      break
+    fi
+  done
+
+  if [ -n "${existing_env_file:-}" ]; then
+    # shellcheck disable=SC1090
+    . "$existing_env_file"
+    RUNTIME_HOME_DEFAULT=${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME_DEFAULT}
+    PUBLIC_URL_DEFAULT=${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL_DEFAULT}
+    HOST_BIND_DEFAULT=${HOST:-$HOST_BIND_DEFAULT}
+    PORT_DEFAULT=${PORT:-$PORT_DEFAULT}
+    ACCESS_MODE_DEFAULT=$(infer_access_mode_from_config "$HOST_BIND_DEFAULT" "$PUBLIC_URL_DEFAULT")
+  fi
+
+  SERVICE_CHOICE_DEFAULT=$(detect_service_choice_default)
+  TAILSCALE_ONBOARDING_DEFAULT="skip"
+  if [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ]; then
+    SKIP_PAIRING=1
+  fi
+fi
+
 TAILSCALE_HOST=$(detect_tailscale_host || true)
-ACCESS_MODE_DEFAULT="tailscale"
 
 WORKSPACE_VERSION=$(read_workspace_version)
 print_banner "$WORKSPACE_VERSION"
@@ -544,13 +651,13 @@ if [ "$ACCESS_MODE" = "tailscale" ]; then
       echo "Tailscale is already connected as ${TAILSCALE_HOST:-unknown-host}" >&2
       ;;
     installed)
-      TAILSCALE_ONBOARDING=$(prompt_choice "Tailscale onboarding (auto/manual/skip)" "auto" "auto manual skip")
+      TAILSCALE_ONBOARDING=$(prompt_choice "Tailscale onboarding (auto/manual/skip)" "$TAILSCALE_ONBOARDING_DEFAULT" "auto manual skip")
       ensure_tailscale_ready "$TAILSCALE_ONBOARDING" || true
       TAILSCALE_HOST=$(detect_tailscale_host || true)
       TAILSCALE_STATUS=$(detect_tailscale_status)
       ;;
     missing)
-      TAILSCALE_ONBOARDING=$(prompt_choice "Tailscale onboarding (auto/manual/skip)" "auto" "auto manual skip")
+      TAILSCALE_ONBOARDING=$(prompt_choice "Tailscale onboarding (auto/manual/skip)" "$TAILSCALE_ONBOARDING_DEFAULT" "auto manual skip")
       ensure_tailscale_ready "$TAILSCALE_ONBOARDING" || true
       TAILSCALE_HOST=$(detect_tailscale_host || true)
       TAILSCALE_STATUS=$(detect_tailscale_status)
@@ -723,18 +830,20 @@ echo "  5. When Buddy UI is available, use the pairing link or QR code shown bel
 if [ "$ACCESS_MODE" = "tailscale" ] && [ -z "${TAILSCALE_HOST:-}" ]; then
   echo "  6. Finish Tailscale login, then update $ENV_FILE if the final MagicDNS name differs"
 fi
-if [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10; then
-  echo
-  echo "Daemon auth token detected. Pairing is ready:"
-  "$INSTALL_DIR/asynq-agentctl" pairing --qr --public-url "$PUBLIC_URL"
-elif [ -f "$AUTH_HINT" ]; then
-  if confirm "Print pairing URI and terminal QR now?" "yes"; then
+if [ "$SKIP_PAIRING" != "1" ]; then
+  if [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10; then
     echo
+    echo "Daemon auth token detected. Pairing is ready:"
     "$INSTALL_DIR/asynq-agentctl" pairing --qr --public-url "$PUBLIC_URL"
+  elif [ -f "$AUTH_HINT" ]; then
+    if confirm "Print pairing URI and terminal QR now?" "yes"; then
+      echo
+      "$INSTALL_DIR/asynq-agentctl" pairing --qr --public-url "$PUBLIC_URL"
+    fi
+  else
+    echo
+    echo "Pairing QR is not ready yet because auth.json does not exist."
+    echo "After the daemon starts and creates $AUTH_HINT, run:"
+    echo "  $INSTALL_DIR/asynq-agentctl pairing --qr --public-url $PUBLIC_URL"
   fi
-else
-  echo
-  echo "Pairing QR is not ready yet because auth.json does not exist."
-  echo "After the daemon starts and creates $AUTH_HINT, run:"
-  echo "  $INSTALL_DIR/asynq-agentctl pairing --qr --public-url $PUBLIC_URL"
 fi

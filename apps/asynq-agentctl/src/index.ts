@@ -188,14 +188,16 @@ async function printPairing(args: string[]): Promise<void> {
 
 async function printStatus(): Promise<void> {
   try {
-    const [stats, sessions, approvals] = await Promise.all([
+    const [stats, sessions, approvals, overview] = await Promise.all([
       request("/stats"),
       request("/sessions"),
       request("/approvals?status=pending"),
+      request("/dashboard/overview").catch(() => undefined),
     ]);
 
     const activeSessions = Array.isArray(sessions) ? sessions : [];
     const pendingApprovals = Array.isArray(approvals) ? approvals : [];
+    const daemonVersion = typeof overview?.daemon?.version === "string" ? overview.daemon.version : undefined;
 
     print({
       endpoint: baseUrl,
@@ -203,6 +205,7 @@ async function printStatus(): Promise<void> {
       daemon: {
         reachable: true,
         auth_token_present: Boolean(resolveToken()),
+        version: daemonVersion ?? null,
       },
       agents: inspectAgents(),
       stats,
@@ -219,6 +222,7 @@ async function printStatus(): Promise<void> {
       daemon: {
         reachable: false,
         auth_token_present: Boolean(resolveToken()),
+        version: null,
       },
       agents: inspectAgents(),
       message: "Daemon is not reachable yet. Start asynq-agentd or check HOST/PORT and auth token settings.",
