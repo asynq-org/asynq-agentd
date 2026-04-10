@@ -39,3 +39,77 @@ test("update service detects a newer GitHub release", async () => {
   assert.equal(status.latest_version, "0.5.0");
   assert.match(status.release_notes ?? "", /Important fixes/i);
 });
+
+test("update service parses structured notes from linked pull requests", async () => {
+  const updates = new UpdateService({
+    currentVersion: "0.4.0",
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.includes("/releases/latest")) {
+        return new Response(JSON.stringify({
+          tag_name: "v0.5.0",
+          html_url: "https://github.com/asynq-org/asynq-agentd/releases/tag/v0.5.0",
+          body: [
+            "Release summary with linked PRs:",
+            "- https://github.com/asynq-org/asynq-agentd/pull/5",
+            "- https://github.com/asynq-org/asynq-agentd/pull/3",
+          ].join("\n"),
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      }
+
+      if (url.includes("/pulls/5")) {
+        return new Response(JSON.stringify({
+          html_url: "https://github.com/asynq-org/asynq-agentd/pull/5",
+          body: [
+            "### asynq-agentd@0.5.0",
+            "",
+            "### Major Changes",
+            "- Add managed update approvals.",
+            "",
+            "### Minor Changes",
+            "- Improve dashboard summaries.",
+            "",
+            "### Patch Changes",
+            "- Fix update status race.",
+          ].join("\n"),
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      }
+
+      if (url.includes("/pulls/3")) {
+        return new Response(JSON.stringify({
+          html_url: "https://github.com/asynq-org/asynq-agentd/pull/3",
+          body: [
+            "### asynq-agentd@0.4.9",
+            "",
+            "### Minor Changes",
+            "- Add compatibility hints to overview.",
+          ].join("\n"),
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        });
+      }
+
+      return new Response("Not found", { status: 404 });
+    },
+  });
+
+  const status = await updates.checkNow();
+  assert.equal(status.status, "update_available");
+  assert.match(status.release_notes ?? "", /asynq-agentd@0\.5\.0/i);
+  assert.match(status.release_notes ?? "", /Major Changes/i);
+  assert.match(status.release_notes ?? "", /Patch Changes/i);
+  assert.match(status.release_notes ?? "", /pull\/5/i);
+});

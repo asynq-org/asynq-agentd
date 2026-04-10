@@ -41,6 +41,11 @@ type LatestReleaseResponse = {
   body?: string;
 };
 
+type PullRequestResponse = {
+  body?: string;
+  html_url?: string;
+};
+
 function defaultRunCommand(command: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn("/bin/sh", ["-lc", command], {
@@ -59,12 +64,17 @@ function defaultRunCommand(command: string): Promise<void> {
   });
 }
 
-function truncateReleaseNotes(body: string | undefined, maxLength = 400): string | undefined {
+function truncateReleaseNotes(body: string | undefined, maxLength = 1600): string | undefined {
   if (!body) {
     return undefined;
   }
 
-  const normalized = body.replace(/\s+/g, " ").trim();
+  const normalized = body
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   if (!normalized) {
     return undefined;
   }
@@ -72,6 +82,121 @@ function truncateReleaseNotes(body: string | undefined, maxLength = 400): string
   return normalized.length <= maxLength
     ? normalized
     : `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+type PullRequestLink = {
+  owner: string;
+  repo: string;
+  number: string;
+  url: string;
+};
+
+function extractPullRequestLinks(text: string | undefined): PullRequestLink[] {
+  if (!text) {
+    return [];
+  }
+
+  const links: PullRequestLink[] = [];
+  const pattern = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/g;
+  const seen = new Set<string>();
+
+  let match = pattern.exec(text);
+  while (match) {
+    const owner = match[1];
+    const repo = match[2];
+    const number = match[3];
+    const url = `https://github.com/${owner}/${repo}/pull/${number}`;
+    if (!seen.has(url)) {
+      seen.add(url);
+      links.push({
+        owner,
+        repo,
+        number,
+        url,
+      });
+    }
+    match = pattern.exec(text);
+  }
+
+  return links;
+}
+
+function parseStructuredReleaseNotes(text: string | undefined): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  const versionMatch = text.match(/asynq-agentd@[^\s)]+/i);
+  if (!versionMatch) {
+    return undefined;
+  }
+
+  const lines = text.split("\n").map((line) => line.trimEnd());
+  const sections: Record<"Major" | "Minor" | "Patch", string[]> = {
+    Major: [],
+    Minor: [],
+    Patch: [],
+  };
+  let currentSection: "Major" | "Minor" | "Patch" | undefined;
+  let inScope = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!inScope && line.toLowerCase().includes(versionMatch[0].toLowerCase())) {
+      inScope = true;
+      continue;
+    }
+
+    if (!inScope) {
+      continue;
+    }
+
+    const heading = line.match(/^(?:#{1,6}\s*)?(Major|Minor|Patch)\s+Changes(?:\s*:)?\s*$/i)
+      ?? line.match(/^\*\*(Major|Minor|Patch)\s+Changes\*\*(?:\s*:)?\s*$/i);
+    if (heading) {
+      const section = heading[1];
+      currentSection = (section[0].toUpperCase() + section.slice(1).toLowerCase()) as "Major" | "Minor" | "Patch";
+      continue;
+    }
+
+    if (/^(?:#{1,6}\s+|##?\s+full changelog|full changelog)/i.test(line)) {
+      currentSection = undefined;
+      continue;
+    }
+
+    if (!currentSection) {
+      continue;
+    }
+
+    if (!line) {
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+      sections[currentSection].push(line);
+      continue;
+    }
+
+    sections[currentSection].push(`- ${line}`);
+  }
+
+  const hasStructuredContent = sections.Major.length > 0 || sections.Minor.length > 0 || sections.Patch.length > 0;
+  if (!hasStructuredContent) {
+    return undefined;
+  }
+
+  const output: string[] = [versionMatch[0]];
+  if (sections.Major.length > 0) {
+    output.push("", "Major Changes", ...sections.Major);
+  }
+  if (sections.Minor.length > 0) {
+    output.push("", "Minor Changes", ...sections.Minor);
+  }
+  if (sections.Patch.length > 0) {
+    output.push("", "Patch Changes", ...sections.Patch);
+  }
+
+  return output.join("\n").trim();
 }
 
 export class UpdateService {
@@ -182,13 +307,18 @@ export class UpdateService {
         return this.getStatus();
       }
 
+      const structuredFromRelease = parseStructuredReleaseNotes(release.body);
+      const structuredFromPullRequests = structuredFromRelease
+        ? undefined
+        : await this.fetchStructuredNotesFromPullRequests(release);
+
       this.status = {
         current_version: this.currentVersion,
         latest_version: latestVersion,
         checked_at: checkedAt,
         status: compareSemver(latestVersion, this.currentVersion) > 0 ? "update_available" : "up_to_date",
         release_url: release.html_url,
-        release_notes: truncateReleaseNotes(release.body),
+        release_notes: truncateReleaseNotes(structuredFromRelease ?? structuredFromPullRequests ?? release.body),
         error: undefined,
         install_supported: true,
       };
@@ -235,5 +365,40 @@ export class UpdateService {
       };
       return this.getStatus();
     }
+  }
+
+  private async fetchStructuredNotesFromPullRequests(release: LatestReleaseResponse): Promise<string | undefined> {
+    const sources = [release.body, release.html_url].filter(Boolean).join("\n");
+    const links = extractPullRequestLinks(sources);
+    if (links.length === 0) {
+      return undefined;
+    }
+
+    const blocks: string[] = [];
+    for (const link of links) {
+      try {
+        const response = await this.fetchImpl(`https://api.github.com/repos/${link.owner}/${link.repo}/pulls/${link.number}`, {
+          headers: {
+            Accept: "application/vnd.github+json",
+            "User-Agent": "asynq-agentd",
+          },
+        });
+        if (!response.ok) {
+          continue;
+        }
+
+        const pullRequest = await response.json() as PullRequestResponse;
+        const parsed = parseStructuredReleaseNotes(pullRequest.body);
+        if (!parsed) {
+          continue;
+        }
+
+        blocks.push(`${parsed}\n\nSource: ${pullRequest.html_url ?? link.url}`);
+      } catch {
+        continue;
+      }
+    }
+
+    return blocks.length > 0 ? blocks.join("\n\n") : undefined;
   }
 }
