@@ -13,6 +13,7 @@ ACCESS_MODE_DEFAULT="tailscale"
 TAILSCALE_ONBOARDING_DEFAULT="auto"
 REUSE_CONFIG=0
 SKIP_PAIRING=0
+SKIP_SERVICE_RELOAD=0
 
 if ! command -v node >/dev/null 2>&1; then
   echo "error: node is required but was not found on PATH" >&2
@@ -36,6 +37,9 @@ while [ "$#" -gt 0 ]; do
     --skip-pairing)
       SKIP_PAIRING=1
       ;;
+    --skip-service-reload)
+      SKIP_SERVICE_RELOAD=1
+      ;;
     --install-dir)
       shift
       [ "$#" -gt 0 ] || { echo "error: --install-dir requires a value" >&2; exit 1; }
@@ -48,7 +52,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       echo "error: unknown argument: $1" >&2
-      echo "usage: ./scripts/install.sh [--reuse-config] [--non-interactive] [--skip-pairing] [--install-dir <path>] [--runtime-home <path>]" >&2
+      echo "usage: ./scripts/install.sh [--reuse-config] [--non-interactive] [--skip-pairing] [--skip-service-reload] [--install-dir <path>] [--runtime-home <path>]" >&2
       exit 1
       ;;
   esac
@@ -766,9 +770,13 @@ if [ "$SERVICE_CHOICE" = "user" ]; then
   </dict>
 </plist>
 EOF
-    launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
-    launchctl load "$PLIST_PATH"
-    SERVICE_STATUS="launchd user agent installed at $PLIST_PATH"
+    if [ "$SKIP_SERVICE_RELOAD" = "1" ]; then
+      SERVICE_STATUS="launchd user agent updated at $PLIST_PATH (reload skipped)"
+    else
+      launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
+      launchctl load "$PLIST_PATH"
+      SERVICE_STATUS="launchd user agent installed at $PLIST_PATH"
+    fi
   elif [ "$UNAME_S" = "Linux" ]; then
     UNIT_PATH="${HOME}/.config/systemd/user/asynq-agentd.service"
     mkdir -p "$(dirname "$UNIT_PATH")"
@@ -791,9 +799,13 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable --now asynq-agentd.service
-    SERVICE_STATUS="systemd user service installed at $UNIT_PATH"
+    if [ "$SKIP_SERVICE_RELOAD" = "1" ]; then
+      SERVICE_STATUS="systemd user service updated at $UNIT_PATH (reload skipped)"
+    else
+      systemctl --user daemon-reload
+      systemctl --user enable --now asynq-agentd.service
+      SERVICE_STATUS="systemd user service installed at $UNIT_PATH"
+    fi
   else
     SERVICE_STATUS="unsupported service platform: $UNAME_S"
   fi
