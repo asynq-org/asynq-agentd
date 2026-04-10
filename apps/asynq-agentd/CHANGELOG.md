@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6
+
+### Patch Changes
+
+- Fix broken self-update logic.
+
+  - Add `--skip-service-reload` so self-update does not stop the running daemon inside installer before explicit restart.
+
 ## 0.4.5
 
 ### Patch Changes
