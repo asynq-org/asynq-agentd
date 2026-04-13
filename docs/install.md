@@ -62,5 +62,6 @@ irm https://agentd.asynq.org/install.ps1 | iex
 - On macOS, the installer now prefers the Homebrew `tailscale` formula over the GUI app flow so the `tailscale` CLI works consistently during onboarding.
 - On Windows, the installer now writes both a PowerShell env file and a `.cmd` env file so the generated wrapper binaries really inherit the saved runtime settings.
 - Pairing requires `auth.json`, which is generated on first daemon start. If the installer cannot find it yet, run `asynq-agentctl pairing` after the daemon is up (or use `--qr` to force terminal QR).
+- Buddy on iPhone requires an `https://...` daemon endpoint for reliable pairing and live updates. In Tailscale Admin Console, enable certs at `DNS → HTTPS Certificates → Enable HTTPS`, then let `asynq-agentctl pairing` auto-bootstrap TLS when possible.
 - Claude-backed tasks require a logged-in Claude Code CLI.
 - Codex-backed tasks require a working `codex` CLI.

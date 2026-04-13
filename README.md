@@ -141,7 +141,7 @@ If you want to use the token in your own shell tooling, run `asynq-agentctl toke
 
 For Buddy mobile pairing, run `node apps/asynq-agentctl/src/index.ts pairing` after the daemon has started once and created `auth.json`. In an interactive terminal the CLI now opens a browser QR preview by default (`--qr` still forces terminal QR), and the installer guides that flow automatically when possible. For `http://...ts.net` endpoints, `pairing` also attempts automatic HTTPS bootstrapping via Tailscale certs unless you pass `--no-ensure-https`.
 
-For production iPhone pairing, prefer an `https://...` public daemon URL. The daemon can now bind HTTPS directly when TLS is enabled in config (for example via `asynq-agentctl tls enable --cert ... --key ...` followed by a restart), and Buddy will automatically upgrade its live transport from `ws://` to `wss://`.
+For production iPhone pairing, use an `https://...` public daemon URL as a requirement. In Tailscale Admin Console, enable certs at `DNS → HTTPS Certificates → Enable HTTPS`. The daemon can now bind HTTPS directly when TLS is enabled in config (for example via `asynq-agentctl tls enable --cert ... --key ...` followed by a restart), and Buddy will automatically upgrade its live transport from `ws://` to `wss://`.
 
 Codex-backed tasks currently expect a working `codex` CLI on `PATH` (or `ASYNQ_AGENTD_CODEX_BIN` pointing to it). Claude-backed tasks expect a working `claude` CLI on `PATH` or at `~/.local/bin/claude` (or `ASYNQ_AGENTD_CLAUDE_BIN` pointing to it), plus an authenticated Claude Code session.
 

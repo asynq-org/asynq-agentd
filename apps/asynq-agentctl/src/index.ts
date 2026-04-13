@@ -150,6 +150,65 @@ function formatExecError(error: unknown): string {
   return maybe.message ?? String(error);
 }
 
+function extractAllowedCertDomains(message: string): string[] {
+  const match = message.match(/must be one of (\[[^\]]+\])/i);
+  if (!match?.[1]) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(match[1]) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeDnsName(value?: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim().replace(/\.$/, "");
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function extractSelfDnsName(statusJson: string): string | undefined {
+  try {
+    const parsed = JSON.parse(statusJson) as { Self?: { DNSName?: string } };
+    return normalizeDnsName(parsed?.Self?.DNSName);
+  } catch {
+    return undefined;
+  }
+}
+
+function updatePublicUrlInEnv(nextPublicUrl: string): string | undefined {
+  const envPath = process.env.ASYNQ_AGENTD_ENV_FILE ?? resolve(runtimeRoot, "asynq-agentd.env");
+  const nextLine = `ASYNQ_AGENTD_PUBLIC_URL=${nextPublicUrl}`;
+
+  try {
+    const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+    const lines = current
+      .split("\n")
+      .filter((line) => line.length > 0);
+    const index = lines.findIndex((line) => line.startsWith("ASYNQ_AGENTD_PUBLIC_URL="));
+    if (index >= 0) {
+      lines[index] = nextLine;
+    } else {
+      lines.push(nextLine);
+    }
+
+    writeFileSync(envPath, `${lines.join("\n")}\n`, "utf8");
+    return envPath;
+  } catch {
+    return undefined;
+  }
+}
+
 function firstIpv4FromText(value: string): string | undefined {
   const lines = value
     .split("\n")
@@ -294,8 +353,9 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
     return { endpoint: endpointRaw, notes };
   }
 
+  let tailscaleStatusJson: string;
   try {
-    execFileSync(tailscale, ["status"], { stdio: "pipe" });
+    tailscaleStatusJson = execFileSync(tailscale, ["status", "--json"], { stdio: "pipe" }).toString("utf8");
   } catch (error) {
     notes.push(`Auto HTTPS skipped: tailscale status check failed (${formatExecError(error)}).`);
     const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
@@ -305,10 +365,20 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
     return { endpoint: endpointRaw, notes };
   }
 
+  const selfDnsName = extractSelfDnsName(tailscaleStatusJson);
+  if (endpointUrl.hostname.endsWith(".ts.net") && selfDnsName && endpointUrl.hostname !== selfDnsName) {
+    const nextFromStatus = new URL(endpointRaw);
+    nextFromStatus.hostname = selfDnsName;
+    endpointRaw = nextFromStatus.toString().replace(/\/$/, "");
+    endpointUrl = new URL(endpointRaw);
+    notes.push(`Pairing host updated to current Tailscale DNS name: ${selfDnsName}.`);
+  }
+
   const certDir = getFlag(args, "--cert-dir") ?? resolve(runtimeRoot, "certs");
-  const certBase = sanitizeFilePart(endpointUrl.hostname);
-  const certPath = getFlag(args, "--cert") ?? resolve(certDir, `${certBase}.crt`);
-  const keyPath = getFlag(args, "--key") ?? resolve(certDir, `${certBase}.key`);
+  let certDomain = endpointUrl.hostname;
+  let certBase = sanitizeFilePart(certDomain);
+  let certPath = getFlag(args, "--cert") ?? resolve(certDir, `${certBase}.crt`);
+  let keyPath = getFlag(args, "--key") ?? resolve(certDir, `${certBase}.key`);
 
   try {
     mkdirSync(certDir, { recursive: true });
@@ -321,21 +391,48 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
     return { endpoint: endpointRaw, notes };
   }
 
-  const certReady = isCertFresh(certPath);
+  let certReady = isCertFresh(certPath);
   if (!certReady) {
     try {
-      execFileSync(tailscale, ["cert", "--cert-file", certPath, "--key-file", keyPath, endpointUrl.hostname], { stdio: "pipe" });
-      notes.push(`Generated/renewed TLS certificate for ${endpointUrl.hostname}.`);
+      execFileSync(tailscale, ["cert", "--cert-file", certPath, "--key-file", keyPath, certDomain], { stdio: "pipe" });
+      notes.push(`Generated/renewed TLS certificate for ${certDomain}.`);
     } catch (error) {
-      notes.push(`Auto HTTPS skipped: tailscale cert failed (${formatExecError(error)}).`);
-      const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
-      if (ipFallback) {
-        return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+      const certError = formatExecError(error);
+      const allowedDomains = extractAllowedCertDomains(certError);
+      if (allowedDomains.length > 0) {
+        certDomain = allowedDomains[0]!;
+        certBase = sanitizeFilePart(certDomain);
+        certPath = resolve(certDir, `${certBase}.crt`);
+        keyPath = resolve(certDir, `${certBase}.key`);
+        certReady = isCertFresh(certPath);
+        notes.push(`Pairing host updated to allowed cert domain: ${certDomain}.`);
+        if (!certReady) {
+          try {
+            execFileSync(tailscale, ["cert", "--cert-file", certPath, "--key-file", keyPath, certDomain], { stdio: "pipe" });
+            notes.push(`Generated/renewed TLS certificate for ${certDomain}.`);
+            certReady = true;
+          } catch (retryError) {
+            notes.push(`Auto HTTPS skipped: tailscale cert failed (${formatExecError(retryError)}).`);
+            const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+            if (ipFallback) {
+              return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+            }
+            return { endpoint: endpointRaw, notes };
+          }
+        } else {
+          notes.push(`Using existing TLS certificate for ${certDomain}.`);
+        }
+      } else {
+        notes.push(`Auto HTTPS skipped: tailscale cert failed (${certError}).`);
+        const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+        if (ipFallback) {
+          return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+        }
+        return { endpoint: endpointRaw, notes };
       }
-      return { endpoint: endpointRaw, notes };
     }
   } else {
-    notes.push(`Using existing TLS certificate for ${endpointUrl.hostname}.`);
+    notes.push(`Using existing TLS certificate for ${certDomain}.`);
   }
 
   try {
@@ -365,8 +462,16 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
   }
 
   const next = new URL(endpointRaw);
+  next.hostname = certDomain;
   next.protocol = "https:";
-  return { endpoint: next.toString().replace(/\/$/, ""), notes };
+  const nextEndpoint = next.toString().replace(/\/$/, "");
+  const persistedEnvPath = updatePublicUrlInEnv(nextEndpoint);
+  if (persistedEnvPath) {
+    notes.push(`Persisted ASYNQ_AGENTD_PUBLIC_URL in ${persistedEnvPath}.`);
+  } else {
+    notes.push("Could not persist ASYNQ_AGENTD_PUBLIC_URL automatically.");
+  }
+  return { endpoint: nextEndpoint, notes };
 }
 
 function inspectAgents() {

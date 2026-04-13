@@ -234,12 +234,16 @@ Generate pairing info:
 asynq-agentctl pairing
 ```
 
+Buddy on iPhone requires an `https://...` daemon endpoint (so live transport can run over `wss://`). In Tailscale Admin Console, enable certs at `DNS → HTTPS Certificates → Enable HTTPS`.
+
 When pairing endpoint is `http://...ts.net`, `pairing` now attempts HTTPS bootstrap automatically:
 
 - checks whether a local cert exists and is still valid
 - renews it with `tailscale cert` when missing/expiring
 - enables daemon TLS with that cert/key
 - tries to restart the daemon service
+- syncs stale `*.ts.net` hostname to the current Tailscale `Self.DNSName` after device rename
+- persists the resolved `ASYNQ_AGENTD_PUBLIC_URL` into the installer env file automatically
 
 Useful flags:
 
