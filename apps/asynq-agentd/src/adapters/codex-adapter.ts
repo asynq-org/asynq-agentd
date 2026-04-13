@@ -9,6 +9,7 @@ interface CodexCliAdapterOptions {
   binArgs?: string[];
   codexHome: string;
   env?: NodeJS.ProcessEnv;
+  keepPipeStdinOpen?: boolean;
 }
 
 interface PendingCommand {
@@ -24,6 +25,7 @@ export class CodexCliAdapter implements AgentAdapter {
   private readonly binArgs: string[];
   private readonly codexHome: string;
   private readonly env: NodeJS.ProcessEnv | undefined;
+  private readonly keepPipeStdinOpen: boolean;
   private readonly processes = new Map<string, ChildProcessWithoutNullStreams>();
   private readonly stopRequested = new Set<string>();
 
@@ -32,6 +34,7 @@ export class CodexCliAdapter implements AgentAdapter {
     this.binArgs = options.binArgs ?? [];
     this.codexHome = options.codexHome;
     this.env = options.env;
+    this.keepPipeStdinOpen = options.keepPipeStdinOpen ?? process.env.ASYNQ_AGENTD_CODEX_KEEP_PIPE_STDIN === "1";
   }
 
   async runTask(task: TaskRecord, session: SessionRecord, hooks: AdapterHooks): Promise<void> {
@@ -55,6 +58,9 @@ export class CodexCliAdapter implements AgentAdapter {
 
     await new Promise<void>((resolve, reject) => {
       const child = this.spawnCodexProcess(spawnPlan.command, spawnPlan.args, task.project_path);
+      if (spawnPlan.mode === "pipe" && !this.keepPipeStdinOpen) {
+        child.stdin.end();
+      }
 
       this.processes.set(session.id, child);
       hooks.onSessionPatch({
@@ -161,6 +167,9 @@ export class CodexCliAdapter implements AgentAdapter {
         spawnPlan.args,
         options?.projectPath ?? process.cwd(),
       );
+      if (spawnPlan.mode === "pipe" && !this.keepPipeStdinOpen) {
+        child.stdin.end();
+      }
       const stderrChunks: string[] = [];
 
       child.stdout.on("data", () => {});

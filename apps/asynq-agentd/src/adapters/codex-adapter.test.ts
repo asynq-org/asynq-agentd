@@ -336,6 +336,7 @@ rl.on("line", (line) => {
     binPath: process.execPath,
     binArgs: [scriptPath],
     codexHome: resolve(root, ".codex"),
+    keepPipeStdinOpen: true,
   });
 
   const session = createSession(projectRoot);
@@ -353,6 +354,49 @@ rl.on("line", (line) => {
   await runPromise;
 
   assert.ok(terminalChunks.some((chunk) => chunk.includes("stdin:hello from terminal")));
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("codex adapter closes stdin in pipe mode so exec can continue without interactive input", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-codex-"));
+  const projectRoot = resolve(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const scriptPath = resolve(root, "fake-codex-eof.mjs");
+
+  writeFileSync(scriptPath, `
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "agent_message",
+      message: "stdin_closed:" + String(input.length)
+    }
+  }));
+});
+`, "utf8");
+
+  const adapter = new CodexCliAdapter({
+    binPath: process.execPath,
+    binArgs: [scriptPath],
+    codexHome: resolve(root, ".codex"),
+  });
+
+  const events: ActivityPayload[] = [];
+  await adapter.runTask(createTask(projectRoot), createSession(projectRoot), {
+    onEvent: (payload) => {
+      events.push(payload);
+    },
+    onSessionPatch: () => {},
+    onTerminalData: () => {},
+  });
+
+  assert.ok(events.some((payload) => payload.type === "agent_output" && payload.message.startsWith("stdin_closed:")));
 
   rmSync(root, { recursive: true, force: true });
 });
