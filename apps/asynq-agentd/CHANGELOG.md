@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- Fix broken pairing QR code
+
+  - Add in-browser QR code as default QR for Buddy pairing
+  - Add support for https
+  - Make https mandatory for iOS
+
 ## 0.4.6
 
 ### Patch Changes
