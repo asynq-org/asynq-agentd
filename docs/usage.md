@@ -234,6 +234,36 @@ Generate pairing info:
 asynq-agentctl pairing
 ```
 
+When pairing endpoint is `http://...ts.net`, `pairing` now attempts HTTPS bootstrap automatically:
+
+- checks whether a local cert exists and is still valid
+- renews it with `tailscale cert` when missing/expiring
+- enables daemon TLS with that cert/key
+- tries to restart the daemon service
+
+Useful flags:
+
+```bash
+asynq-agentctl pairing --ensure-https
+asynq-agentctl pairing --no-ensure-https
+asynq-agentctl pairing --cert-dir ~/.asynq-agentd/certs
+asynq-agentctl pairing --cert ~/.asynq-agentd/certs/my-host.crt --key ~/.asynq-agentd/certs/my-host.key
+asynq-agentctl pairing --ip-fallback 100.101.102.103
+asynq-agentctl pairing --no-ip-fallback
+```
+
+Open browser QR preview explicitly:
+
+```bash
+asynq-agentctl pairing --open-qr
+```
+
+Force terminal QR explicitly:
+
+```bash
+asynq-agentctl pairing --qr
+```
+
 JSON output for your own tooling:
 
 ```bash

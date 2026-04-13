@@ -1,6 +1,6 @@
-import { accessSync, constants, createReadStream, existsSync, readFileSync, statSync, watchFile, unwatchFile } from "node:fs";
+import { accessSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, watchFile, writeFileSync, unwatchFile } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { homedir, platform } from "node:os";
+import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
 import { delimiter, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import QRCode from "qrcode";
@@ -77,6 +77,298 @@ function findExecutable(name: string, extraCandidates: string[] = []): string | 
   return undefined;
 }
 
+function sanitizeFilePart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function isLikelyIpv4(value: string): boolean {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(value.trim());
+}
+
+function isValidIpv4(value: string): boolean {
+  if (!isLikelyIpv4(value)) {
+    return false;
+  }
+
+  return value.split(".").every((segment) => {
+    const parsed = Number(segment);
+    return Number.isInteger(parsed) && parsed >= 0 && parsed <= 255;
+  });
+}
+
+function isPreferredFallbackIpv4(value: string): boolean {
+  if (!isValidIpv4(value)) {
+    return false;
+  }
+
+  const [a, b] = value.split(".").map((segment) => Number(segment));
+  if (a === 10) {
+    return true;
+  }
+
+  if (a === 192 && b === 168) {
+    return true;
+  }
+
+  if (a === 172 && b >= 16 && b <= 31) {
+    return true;
+  }
+
+  // Tailscale carrier-grade range.
+  if (a === 100 && b >= 64 && b <= 127) {
+    return true;
+  }
+
+  return false;
+}
+
+function formatExecError(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return String(error);
+  }
+
+  const maybe = error as {
+    message?: string;
+    stderr?: Buffer | string;
+    stdout?: Buffer | string;
+  };
+  const stderr = typeof maybe.stderr === "string"
+    ? maybe.stderr
+    : maybe.stderr instanceof Buffer
+      ? maybe.stderr.toString("utf8")
+      : "";
+  const stdout = typeof maybe.stdout === "string"
+    ? maybe.stdout
+    : maybe.stdout instanceof Buffer
+      ? maybe.stdout.toString("utf8")
+      : "";
+  const detail = (stderr || stdout).trim();
+  if (detail) {
+    return detail.split("\n")[0] ?? detail;
+  }
+
+  return maybe.message ?? String(error);
+}
+
+function firstIpv4FromText(value: string): string | undefined {
+  const lines = value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (isValidIpv4(line)) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+function resolveLocalFallbackIpv4(): string | undefined {
+  const all = networkInterfaces();
+  const candidates: string[] = [];
+  for (const entries of Object.values(all)) {
+    for (const entry of entries ?? []) {
+      if (entry.family !== "IPv4" || entry.internal) {
+        continue;
+      }
+      if (isPreferredFallbackIpv4(entry.address)) {
+        candidates.push(entry.address);
+      }
+    }
+  }
+
+  return candidates[0];
+}
+
+function withHost(endpointRaw: string, host: string): string {
+  const next = new URL(endpointRaw);
+  next.hostname = host;
+  return next.toString().replace(/\/$/, "");
+}
+
+function tryHttpIpFallback(args: string[], endpointRaw: string, tailscalePath?: string): { endpoint: string; notes: string[] } | null {
+  if (args.includes("--no-ip-fallback")) {
+    return null;
+  }
+
+  let endpointUrl: URL;
+  try {
+    endpointUrl = new URL(endpointRaw);
+  } catch {
+    return null;
+  }
+
+  if (endpointUrl.protocol !== "http:") {
+    return null;
+  }
+
+  const notes: string[] = [];
+  const explicitIp = getFlag(args, "--ip-fallback");
+  if (explicitIp) {
+    if (isValidIpv4(explicitIp)) {
+      return {
+        endpoint: withHost(endpointRaw, explicitIp),
+        notes: ["Using explicit IP fallback endpoint (--ip-fallback)."],
+      };
+    }
+    notes.push(`Ignored invalid --ip-fallback value: ${explicitIp}.`);
+  }
+
+  if (tailscalePath) {
+    try {
+      const output = execFileSync(tailscalePath, ["ip", "-4"], { stdio: "pipe" }).toString("utf8");
+      const tsIp = firstIpv4FromText(output);
+      if (tsIp) {
+        return {
+          endpoint: withHost(endpointRaw, tsIp),
+          notes: [...notes, `Using Tailscale IP fallback endpoint: ${tsIp}.`],
+        };
+      }
+    } catch {
+      // Ignore and continue to local-interface fallback.
+    }
+  }
+
+  const localIp = resolveLocalFallbackIpv4();
+  if (localIp) {
+    return {
+      endpoint: withHost(endpointRaw, localIp),
+      notes: [...notes, `Using local IPv4 fallback endpoint: ${localIp}.`],
+    };
+  }
+
+  if (notes.length > 0) {
+    return { endpoint: endpointRaw, notes };
+  }
+
+  return null;
+}
+
+function isCertFresh(certPath: string, minSeconds = 24 * 60 * 60): boolean {
+  const openssl = findExecutable("openssl");
+  if (!openssl || !existsSync(certPath)) {
+    return false;
+  }
+
+  try {
+    execFileSync(openssl, ["x509", "-checkend", String(minSeconds), "-noout", "-in", certPath], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shouldEnsureHttpsPairing(args: string[], endpoint: URL): boolean {
+  if (args.includes("--no-ensure-https")) {
+    return false;
+  }
+
+  if (args.includes("--ensure-https")) {
+    return endpoint.protocol === "http:";
+  }
+
+  return endpoint.protocol === "http:" && endpoint.hostname.endsWith(".ts.net");
+}
+
+async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise<{ endpoint: string; notes: string[] }> {
+  const notes: string[] = [];
+  let endpointUrl: URL;
+
+  try {
+    endpointUrl = new URL(endpointRaw);
+  } catch {
+    return { endpoint: endpointRaw, notes };
+  }
+
+  if (!shouldEnsureHttpsPairing(args, endpointUrl)) {
+    return { endpoint: endpointRaw, notes };
+  }
+
+  const tailscale = findExecutable("tailscale");
+  if (!tailscale) {
+    notes.push("Auto HTTPS skipped: tailscale CLI not found on PATH.");
+    const ipFallback = tryHttpIpFallback(args, endpointRaw);
+    if (ipFallback) {
+      return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+    }
+    return { endpoint: endpointRaw, notes };
+  }
+
+  try {
+    execFileSync(tailscale, ["status"], { stdio: "pipe" });
+  } catch (error) {
+    notes.push(`Auto HTTPS skipped: tailscale status check failed (${formatExecError(error)}).`);
+    const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+    if (ipFallback) {
+      return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+    }
+    return { endpoint: endpointRaw, notes };
+  }
+
+  const certDir = getFlag(args, "--cert-dir") ?? resolve(runtimeRoot, "certs");
+  const certBase = sanitizeFilePart(endpointUrl.hostname);
+  const certPath = getFlag(args, "--cert") ?? resolve(certDir, `${certBase}.crt`);
+  const keyPath = getFlag(args, "--key") ?? resolve(certDir, `${certBase}.key`);
+
+  try {
+    mkdirSync(certDir, { recursive: true });
+  } catch (error) {
+    notes.push(`Auto HTTPS skipped: could not prepare cert directory (${error instanceof Error ? error.message : String(error)}).`);
+    const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+    if (ipFallback) {
+      return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+    }
+    return { endpoint: endpointRaw, notes };
+  }
+
+  const certReady = isCertFresh(certPath);
+  if (!certReady) {
+    try {
+      execFileSync(tailscale, ["cert", "--cert-file", certPath, "--key-file", keyPath, endpointUrl.hostname], { stdio: "pipe" });
+      notes.push(`Generated/renewed TLS certificate for ${endpointUrl.hostname}.`);
+    } catch (error) {
+      notes.push(`Auto HTTPS skipped: tailscale cert failed (${formatExecError(error)}).`);
+      const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+      if (ipFallback) {
+        return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+      }
+      return { endpoint: endpointRaw, notes };
+    }
+  } else {
+    notes.push(`Using existing TLS certificate for ${endpointUrl.hostname}.`);
+  }
+
+  try {
+    await request("/config", {
+      method: "PATCH",
+      body: JSON.stringify({
+        tls: {
+          enabled: true,
+          cert_path: certPath,
+          key_path: keyPath,
+        },
+      }),
+    });
+  } catch (error) {
+    notes.push(`Auto HTTPS cert is ready, but enabling daemon TLS failed (${error instanceof Error ? error.message : String(error)}).`);
+    const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
+    if (ipFallback) {
+      return { endpoint: ipFallback.endpoint, notes: [...notes, ...ipFallback.notes] };
+    }
+    return { endpoint: endpointRaw, notes };
+  }
+
+  if (tryRestartServiceSilently()) {
+    notes.push("Daemon restart requested after TLS update.");
+  } else {
+    notes.push("TLS configured. Restart daemon to start serving HTTPS.");
+  }
+
+  const next = new URL(endpointRaw);
+  next.protocol = "https:";
+  return { endpoint: next.toString().replace(/\/$/, ""), notes };
+}
+
 function inspectAgents() {
   const home = process.env.HOME ?? homedir();
   const claudePath = process.env.ASYNQ_AGENTD_CLAUDE_BIN
@@ -137,7 +429,127 @@ function shouldPrintQr(args: string[], format: string): boolean {
     return true;
   }
 
-  return Boolean(process.stdout.isTTY);
+  return false;
+}
+
+function shouldOpenQrInBrowser(args: string[], format: string): boolean {
+  if (format === "json") {
+    return false;
+  }
+
+  if (args.includes("--no-open-qr") || args.includes("--no-browser-qr")) {
+    return false;
+  }
+
+  return args.includes("--open-qr") || args.includes("--browser-qr");
+}
+
+function htmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function openUrlInBrowser(target: string): void {
+  switch (servicePlatform) {
+    case "darwin":
+      execFileSync("open", [target], { stdio: "ignore" });
+      return;
+    case "win32":
+      execFileSync("cmd", ["/c", "start", "", target], { stdio: "ignore" });
+      return;
+    default:
+      execFileSync("xdg-open", [target], { stdio: "ignore" });
+  }
+}
+
+async function openPairingQrInBrowser(pairingWebUrl: string): Promise<void> {
+  const qrSvg = await QRCode.toString(pairingWebUrl, {
+    type: "svg",
+    margin: 1,
+    width: 520,
+    color: {
+      dark: "#111827",
+      light: "#ffffff",
+    },
+  });
+  const qrHtml = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Asynq Buddy Pairing QR</title>
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: radial-gradient(1200px 700px at 20% -10%, #eef2ff 0%, #ffffff 55%);
+        color: #0f172a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .card {
+        width: min(92vw, 760px);
+        border-radius: 24px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.12);
+        padding: 28px;
+      }
+      .eyebrow {
+        letter-spacing: 0.08em;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: #475569;
+      }
+      h1 {
+        margin: 8px 0 10px;
+        font-size: clamp(1.5rem, 3vw, 2rem);
+      }
+      p {
+        margin: 0 0 18px;
+        color: #334155;
+      }
+      .qr {
+        display: grid;
+        place-items: center;
+        margin: 14px 0 18px;
+      }
+      .qr svg {
+        width: min(80vw, 520px);
+        height: auto;
+      }
+      code {
+        display: block;
+        word-break: break-all;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 12px;
+        color: #0f172a;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="eyebrow">Asynq Buddy Pairing</div>
+      <h1>Scan this QR in the Buddy app</h1>
+      <div class="qr">${qrSvg}</div>
+      <code>${htmlEscape(pairingWebUrl)}</code>
+    </main>
+  </body>
+</html>
+`;
+  const targetDir = mkdtempSync(resolve(tmpdir(), "asynq-agentctl-pairing-"));
+  const htmlPath = resolve(targetDir, "pairing-qr.html");
+  writeFileSync(htmlPath, qrHtml, "utf8");
+  openUrlInBrowser(htmlPath);
 }
 
 async function printPairing(args: string[]): Promise<void> {
@@ -146,7 +558,8 @@ async function printPairing(args: string[]): Promise<void> {
     throw new Error("No auth token found. Start the daemon first so it can create auth.json.");
   }
 
-  const endpoint = getFlag(args, "--public-url") ?? publicUrl;
+  const requestedEndpoint = getFlag(args, "--public-url") ?? publicUrl;
+  const { endpoint, notes } = await tryAutoHttpsPairing(args, requestedEndpoint);
   const label = getFlag(args, "--label") ?? "Asynq Buddy";
   const payload = {
     endpoint,
@@ -159,6 +572,13 @@ async function printPairing(args: string[]): Promise<void> {
   const pairingWebUrl = `https://buddy.asynq.org/pair?data=${encoded}`;
   const format = getFlag(args, "--format") ?? "text";
   const includeQr = shouldPrintQr(args, format);
+  const openQrInBrowser = shouldOpenQrInBrowser(args, format)
+    || (
+      format !== "json"
+      && !includeQr
+      && !args.includes("--no-open-qr")
+      && !args.includes("--no-browser-qr")
+    );
 
   if (format === "json") {
     print({
@@ -173,6 +593,11 @@ async function printPairing(args: string[]): Promise<void> {
 
   console.log(`Label: ${label}`);
   console.log(`Endpoint: ${endpoint}`);
+  if (notes.length > 0) {
+    for (const note of notes) {
+      console.log(`Note: ${note}`);
+    }
+  }
   console.log(`Pairing URI: ${pairingUri}`);
   console.log(`Web fallback: ${pairingWebUrl}`);
 
@@ -183,6 +608,20 @@ async function printPairing(args: string[]): Promise<void> {
     });
     console.log("");
     process.stdout.write(qr);
+  }
+
+  if (openQrInBrowser) {
+    console.log("");
+    try {
+      await openPairingQrInBrowser(pairingWebUrl);
+      console.log("Opened browser QR preview.");
+    } catch {
+      console.log("Could not open browser QR preview automatically.");
+      console.log("Use the web fallback URL above, or rerun with --qr for terminal QR.");
+    }
+  } else {
+    console.log("");
+    console.log("Tip: use --open-qr for browser QR preview, or --qr for terminal QR.");
   }
 }
 
@@ -569,6 +1008,26 @@ function runServiceLifecycle(action: "start" | "stop" | "restart"): void {
     action,
     unit: systemdUnitName,
   });
+}
+
+function tryRestartServiceSilently(): boolean {
+  try {
+    const kind = requireInstalledService();
+    if (kind === "launchd") {
+      const uid = typeof process.getuid === "function" ? String(process.getuid()) : undefined;
+      if (!uid) {
+        return false;
+      }
+      const domainTarget = `gui/${uid}/${launchdLabel}`;
+      execFileSync("launchctl", ["kickstart", "-k", domainTarget], { stdio: "ignore" });
+      return true;
+    }
+
+    execFileSync("systemctl", ["--user", "restart", systemdUnitName], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function request(path: string, init?: RequestInit) {

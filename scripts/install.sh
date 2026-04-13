@@ -845,17 +845,17 @@ fi
 if [ "$SKIP_PAIRING" != "1" ]; then
   if [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10; then
     echo
-    echo "Daemon auth token detected. Pairing is ready:"
-    "$INSTALL_DIR/asynq-agentctl" pairing --qr --public-url "$PUBLIC_URL"
+    echo "Daemon auth token detected. Pairing is ready (opening browser QR):"
+    "$INSTALL_DIR/asynq-agentctl" pairing --open-qr --no-qr --public-url "$PUBLIC_URL"
   elif [ -f "$AUTH_HINT" ]; then
-    if confirm "Print pairing URI and terminal QR now?" "yes"; then
+    if confirm "Print pairing URI and open browser QR now?" "yes"; then
       echo
-      "$INSTALL_DIR/asynq-agentctl" pairing --qr --public-url "$PUBLIC_URL"
+      "$INSTALL_DIR/asynq-agentctl" pairing --open-qr --no-qr --public-url "$PUBLIC_URL"
     fi
   else
     echo
     echo "Pairing QR is not ready yet because auth.json does not exist."
     echo "After the daemon starts and creates $AUTH_HINT, run:"
-    echo "  $INSTALL_DIR/asynq-agentctl pairing --qr --public-url $PUBLIC_URL"
+    echo "  $INSTALL_DIR/asynq-agentctl pairing --open-qr --no-qr --public-url $PUBLIC_URL"
   fi
 fi

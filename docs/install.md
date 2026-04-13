@@ -20,7 +20,7 @@ The script:
 - uses a CLI-first Tailscale flow on macOS (`brew services start tailscale` + `tailscale up`) so the pairing URL can use MagicDNS immediately
 - writes a reusable env file with bind host, port, and pairing URL defaults
 - asks for a public daemon URL so pairing QR codes can point at the right address
-- prints a pairing QR automatically once the daemon has created `auth.json`
+- opens a browser pairing QR automatically once the daemon has created `auth.json`
 
 Hosted one-line setup can use a thin Pages wrapper like:
 
@@ -45,7 +45,7 @@ The PowerShell installer:
 - offers first-class Tailscale onboarding and can best-effort install Tailscale with `winget`
 - attempts `tailscale up` during install so the generated public URL can point at the real tailnet hostname
 - accepts a public daemon URL for pairing
-- prints pairing instructions, and prints a QR immediately if the daemon has already created `auth.json`
+- prints pairing instructions, and opens a browser QR immediately if the daemon has already created `auth.json`
 
 Hosted one-line setup can use a thin Pages wrapper like:
 
@@ -61,6 +61,6 @@ irm https://agentd.asynq.org/install.ps1 | iex
 - If Tailscale is selected but auto-onboarding cannot complete, the installer still falls back safely: it keeps the generated env file, prints the next manual step, and lets you fix the public URL later.
 - On macOS, the installer now prefers the Homebrew `tailscale` formula over the GUI app flow so the `tailscale` CLI works consistently during onboarding.
 - On Windows, the installer now writes both a PowerShell env file and a `.cmd` env file so the generated wrapper binaries really inherit the saved runtime settings.
-- Pairing requires `auth.json`, which is generated on first daemon start. If the installer cannot find it yet, run `asynq-agentctl pairing` after the daemon is up; in an interactive terminal it now prints a QR code by default.
+- Pairing requires `auth.json`, which is generated on first daemon start. If the installer cannot find it yet, run `asynq-agentctl pairing` after the daemon is up (or use `--qr` to force terminal QR).
 - Claude-backed tasks require a logged-in Claude Code CLI.
 - Codex-backed tasks require a working `codex` CLI.

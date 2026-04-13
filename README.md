@@ -96,7 +96,7 @@ irm https://agentd.asynq.org/install.ps1 | iex
 
 More detail is in [docs/install.md](./docs/install.md).
 
-The bootstrap installer is interactive: it can set runtime home, choose an access mode (`local`, `tailscale`, `custom`), guide first-class Tailscale onboarding with a CLI-first macOS flow, write a reusable env file with bind/public URL defaults, install a per-user service, capture the public daemon URL for mobile pairing, and print a pairing QR as soon as the daemon has generated `auth.json`.
+The bootstrap installer is interactive: it can set runtime home, choose an access mode (`local`, `tailscale`, `custom`), guide first-class Tailscale onboarding with a CLI-first macOS flow, write a reusable env file with bind/public URL defaults, install a per-user service, capture the public daemon URL for mobile pairing, and open a browser QR preview as soon as the daemon has generated `auth.json`.
 
 The hosted `install.sh` and `install.ps1` entrypoints are intentionally thin wrappers today: they clone the repository into a temporary directory and then run the real bootstrap installer from that checkout.
 
@@ -139,7 +139,7 @@ Authenticated routes use the token from `.asynq-agentd/auth.json`. The CLI reads
 
 If you want to use the token in your own shell tooling, run `asynq-agentctl token` or `asynq-agentctl token --shell`.
 
-For Buddy mobile pairing, run `node apps/asynq-agentctl/src/index.ts pairing` after the daemon has started once and created `auth.json`. In an interactive terminal the CLI now prints a QR code by default, and the installer guides that flow automatically when possible.
+For Buddy mobile pairing, run `node apps/asynq-agentctl/src/index.ts pairing` after the daemon has started once and created `auth.json`. In an interactive terminal the CLI now opens a browser QR preview by default (`--qr` still forces terminal QR), and the installer guides that flow automatically when possible. For `http://...ts.net` endpoints, `pairing` also attempts automatic HTTPS bootstrapping via Tailscale certs unless you pass `--no-ensure-https`.
 
 For production iPhone pairing, prefer an `https://...` public daemon URL. The daemon can now bind HTTPS directly when TLS is enabled in config (for example via `asynq-agentctl tls enable --cert ... --key ...` followed by a restart), and Buddy will automatically upgrade its live transport from `ws://` to `wss://`.
 

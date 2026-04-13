@@ -525,17 +525,17 @@ if ($AccessMode -eq "tailscale" -and -not $tailscaleHost) {
 $authPath = Join-Path $RuntimeHome "auth.json"
 if ($ServiceMode -eq "user" -and (Wait-ForAuth -AuthPath $authPath -TimeoutSeconds 10)) {
   Write-Host ""
-  Write-Host "Daemon auth token detected. Pairing is ready:"
-  & $agentctlCmd pairing --qr --public-url $PublicUrl
+  Write-Host "Daemon auth token detected. Pairing is ready (opening browser QR):"
+  & $agentctlCmd pairing --open-qr --no-qr --public-url $PublicUrl
 } elseif (Test-Path $authPath) {
   Write-Host ""
-  $printPairing = Read-Host "Print pairing URI and terminal QR now? [Y/n]"
+  $printPairing = Read-Host "Print pairing URI and open browser QR now? [Y/n]"
   if ([string]::IsNullOrWhiteSpace($printPairing) -or $printPairing -match '^(y|yes)$') {
-    & $agentctlCmd pairing --qr --public-url $PublicUrl
+    & $agentctlCmd pairing --open-qr --no-qr --public-url $PublicUrl
   }
 } else {
   Write-Host ""
   Write-Host "Pairing QR is not ready yet because auth.json does not exist."
   Write-Host "After the daemon starts and creates $authPath, run:"
-  Write-Host "  $agentctlCmd pairing --qr --public-url $PublicUrl"
+  Write-Host "  $agentctlCmd pairing --open-qr --no-qr --public-url $PublicUrl"
 }
