@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createServer as createHttpListener, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createServer as createHttpsListener, type Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
+import { resolve } from "node:path";
 import type { DaemonConfig } from "../domain.ts";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { SessionService } from "../services/session-service.ts";
@@ -42,6 +44,17 @@ interface AnalyticsEventInput {
   source?: "mobile";
   created_at?: string;
   properties?: Record<string, unknown>;
+}
+
+interface MarkdownExportInput {
+  title?: string;
+  content?: string;
+  project_path?: string;
+}
+
+interface OpenExportInput {
+  path?: string;
+  reveal?: boolean;
 }
 
 function isPublicRoute(method: string, path: string): boolean {
@@ -292,6 +305,71 @@ function compactContinuationText(text: string, maxLength = 480): string {
   }
 
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function sanitizeFileSlug(input: string): string {
+  return input
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .toLowerCase()
+    .slice(0, 64) || "managed-output";
+}
+
+function formatExportTimestamp(date: Date): string {
+  return date.toISOString().replace(/:/g, "-").replace(/\.\d+Z$/, "Z");
+}
+
+function ensureExportsGitignored(projectPath: string): void {
+  const gitignorePath = resolve(projectPath, ".gitignore");
+  if (!existsSync(gitignorePath)) {
+    return;
+  }
+
+  const current = readFileSync(gitignorePath, "utf8");
+  const normalizedEntries = current
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^\/+/, ""));
+  if (normalizedEntries.includes(".asynq-exports") || normalizedEntries.includes(".asynq-exports/")) {
+    return;
+  }
+
+  const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
+  const next = `${current}${separator}.asynq-exports/\n`;
+  writeFileSync(gitignorePath, next, "utf8");
+}
+
+function writeMarkdownExport(projectPath: string, title: string, content: string): { path: string; bytes: number } {
+  const exportDir = resolve(projectPath, ".asynq-exports");
+  mkdirSync(exportDir, { recursive: true });
+  ensureExportsGitignored(projectPath);
+  const now = new Date();
+  const filePath = resolve(exportDir, `${sanitizeFileSlug(title)}-${formatExportTimestamp(now)}.md`);
+  const heading = title.trim() || "Managed output";
+  const payload = `# ${heading}\n\nGenerated: ${now.toISOString()}\nProject: ${projectPath}\n\n---\n\n${content.trim()}\n`;
+  writeFileSync(filePath, payload, "utf8");
+  return {
+    path: filePath,
+    bytes: Buffer.byteLength(payload, "utf8"),
+  };
+}
+
+function isExportPathAllowed(absolutePath: string): boolean {
+  return absolutePath.includes("/.asynq-exports/") && absolutePath.endsWith(".md");
+}
+
+function openFileOnHost(path: string, reveal = false): void {
+  const args = reveal ? ["-R", path] : [path];
+  const child = spawn("open", args, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 }
 
 export function parseTerminalControlMessage(payload: string): TerminalControlMessage {
@@ -619,6 +697,55 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
           ok: true,
           status,
         });
+        return;
+      }
+
+      if (method === "POST" && path === "/exports/markdown") {
+        const body = await readBody<MarkdownExportInput>();
+        const content = pickString(body.content);
+        if (!content) {
+          send(400, { error: "content is required" });
+          return;
+        }
+
+        const projectPath = pickString(body.project_path);
+        if (!projectPath) {
+          send(400, { error: "project_path is required" });
+          return;
+        }
+
+        const resolvedProjectPath = resolve(projectPath);
+        if (!existsSync(resolvedProjectPath)) {
+          send(400, { error: `project_path does not exist: ${resolvedProjectPath}` });
+          return;
+        }
+
+        const title = pickString(body.title) ?? "Managed output";
+        const result = writeMarkdownExport(resolvedProjectPath, title, content);
+        send(201, { ok: true, ...result });
+        return;
+      }
+
+      if (method === "POST" && path === "/exports/open") {
+        const body = await readBody<OpenExportInput>();
+        const requestedPath = pickString(body.path);
+        if (!requestedPath) {
+          send(400, { error: "path is required" });
+          return;
+        }
+
+        const absolutePath = resolve(requestedPath);
+        if (!existsSync(absolutePath)) {
+          send(400, { error: `path does not exist: ${absolutePath}` });
+          return;
+        }
+        if (!isExportPathAllowed(absolutePath)) {
+          send(400, { error: "path is not an allowed export file" });
+          return;
+        }
+
+        openFileOnHost(absolutePath, body.reveal !== false);
+        send(202, { ok: true, path: absolutePath });
         return;
       }
 
