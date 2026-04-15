@@ -15,6 +15,7 @@ import { EventStreamService } from "../services/event-stream-service.ts";
 import { TerminalStreamService } from "../services/terminal-stream-service.ts";
 import { DashboardService } from "../services/dashboard-service.ts";
 import { UpdateService } from "../services/update-service.ts";
+import { normalizeResolutionStrategy, parseObservedApprovalId, type ObservedResolutionStrategy, type ResolveObservedApprovalInput, type ObservedResolutionService } from "../services/observed-resolution-service.ts";
 import { createWebSocketAccept, encodeWebSocketPongFrame, encodeWebSocketTextFrame, parseWebSocketFrames } from "../utils/websocket.ts";
 import { AGENTD_VERSION } from "../version.ts";
 
@@ -29,6 +30,7 @@ interface AppServices {
   terminalStreams: TerminalStreamService;
   dashboard: DashboardService;
   updates: UpdateService;
+  observedResolution: ObservedResolutionService;
 }
 
 interface TerminalControlMessage {
@@ -765,8 +767,29 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
       }
 
       if (method === "POST" && approvalMatch) {
-        const body = await readBody<{ decision: "approved" | "rejected"; note?: string }>();
-        send(200, services.sessions.resolveApproval(approvalMatch[1], body.decision, body.note));
+        const body = await readBody<{
+          decision: "approved" | "rejected";
+          note?: string;
+          resolution_strategy?: ObservedResolutionStrategy;
+          require_verification?: boolean;
+        }>();
+
+        const approvalId = approvalMatch[1];
+        const observedRecentWorkId = parseObservedApprovalId(approvalId);
+        if (observedRecentWorkId) {
+          const strategy = normalizeResolutionStrategy(body.resolution_strategy) ?? "auto";
+          const input: ResolveObservedApprovalInput = {
+            approvalId,
+            decision: body.decision,
+            note: body.note,
+            resolutionStrategy: strategy,
+            requireVerification: body.require_verification !== false,
+          };
+          send(200, await services.observedResolution.resolve(input));
+          return;
+        }
+
+        send(200, services.sessions.resolveApproval(approvalId, body.decision, body.note));
         return;
       }
 

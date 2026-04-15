@@ -141,7 +141,6 @@ export class DashboardService {
         || session.state === "waiting_approval"
         || session.state === "completed"
       )
-      .filter((session) => !this.findLinkedManagedContinuation(session.id))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
       .slice(0, 12);
     return {
@@ -421,6 +420,8 @@ export class DashboardService {
     }
 
     const task = session.task_id ? this.tasks.get(session.task_id) : undefined;
+    const parentSessionId = this.pickString(task?.context?.parent_session_id);
+    const parentSession = parentSessionId ? this.sessions.getRecord(parentSessionId) : undefined;
     const linkedRecentWorkId = task ? this.linkedRecentWorkId(task) : undefined;
     const linkedRecentWork = linkedRecentWorkId ? this.storage.getRecentWork(linkedRecentWorkId) : undefined;
     const linkedMetadata = linkedRecentWork?.metadata ?? {};
@@ -435,16 +436,23 @@ export class DashboardService {
       session,
       this.pickManagedSessionSummary(session.id, rawAgentResponse) ?? this.summarizeSession(session),
     );
-    const sourceObserved = linkedRecentWork
+    const sourceObserved = parentSession
       ? {
-          recent_work_id: linkedRecentWork.id,
-          title: this.summaries.readContinueCard(
-            linkedRecentWork,
-            this.summarizeRecentWorkTitle(linkedRecentWork),
-            this.summarizeRecentWorkForContinue(linkedRecentWork),
-          ).title,
+          recent_work_id: parentSession.id,
+          title: parentSession.title,
+          source_session_kind: "managed" as const,
         }
-      : undefined;
+      : linkedRecentWork
+        ? {
+            recent_work_id: linkedRecentWork.id,
+            title: this.summaries.readContinueCard(
+              linkedRecentWork,
+              this.summarizeRecentWorkTitle(linkedRecentWork),
+              this.summarizeRecentWorkForContinue(linkedRecentWork),
+            ).title,
+            source_session_kind: "observed" as const,
+          }
+        : undefined;
 
     return {
       id: session.id,
@@ -475,8 +483,11 @@ export class DashboardService {
 
   private toSessionCard(session: SessionRecord) {
     const task = session.task_id ? this.tasks.get(session.task_id) : undefined;
+    const parentSessionId = this.pickString(task?.context?.parent_session_id);
+    const parentSession = parentSessionId ? this.sessions.getRecord(parentSessionId) : undefined;
     const linkedRecentWorkId = task ? this.linkedRecentWorkId(task) : undefined;
     const linkedRecentWork = linkedRecentWorkId ? this.storage.getRecentWork(linkedRecentWorkId) : undefined;
+    const sourceSessionKind = parentSession ? "managed" : linkedRecentWork ? "observed" : undefined;
     return {
       session_id: session.id,
       task_id: session.task_id,
@@ -497,14 +508,19 @@ export class DashboardService {
         transport: this.pickString(session.metadata?.terminal_transport) ?? "direct",
         size: session.metadata?.terminal_size ?? null,
       },
-      source_observed_id: linkedRecentWork?.id,
-      source_observed_title: linkedRecentWork
-        ? this.summaries.readContinueCard(
-          linkedRecentWork,
-          this.summarizeRecentWorkTitle(linkedRecentWork),
-          this.summarizeRecentWorkForContinue(linkedRecentWork),
-        ).title
-        : undefined,
+      source_observed_id: parentSession
+        ? parentSession.id
+        : linkedRecentWork?.id,
+      source_observed_title: parentSession
+        ? parentSession.title
+        : linkedRecentWork
+          ? this.summaries.readContinueCard(
+            linkedRecentWork,
+            this.summarizeRecentWorkTitle(linkedRecentWork),
+            this.summarizeRecentWorkForContinue(linkedRecentWork),
+          ).title
+          : undefined,
+      source_session_kind: sourceSessionKind,
       can_delete: this.tasks.canDeleteManagedSession(session.id),
       updated_at: session.updated_at,
     };

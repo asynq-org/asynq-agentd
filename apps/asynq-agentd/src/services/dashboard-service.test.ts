@@ -410,7 +410,7 @@ test("dashboard service hides internal Codex artifact sessions from continue wor
   rmSync(root, { recursive: true, force: true });
 });
 
-test("dashboard service inherits observed linkage through managed continuation chains and only lists latest managed leaf", () => {
+test("dashboard service keeps managed parent sessions visible and links child sessions to managed parent", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
   const tasks = new TaskService(storage);
@@ -483,9 +483,12 @@ test("dashboard service inherits observed linkage through managed continuation c
   });
 
   const managedSessions = dashboard.getManagedSessions();
-  assert.equal(managedSessions.items.length, 1);
-  assert.equal(managedSessions.items[0]?.session_id, childSession.id);
-  assert.equal(managedSessions.items[0]?.source_observed_id, "recent_observed_1");
+  assert.ok(managedSessions.items.some((item) => item.session_id === rootSession.id));
+  assert.ok(managedSessions.items.some((item) => item.session_id === childSession.id));
+
+  const childCard = managedSessions.items.find((item) => item.session_id === childSession.id);
+  assert.equal(childCard?.source_observed_id, rootSession.id);
+  assert.equal(childCard?.source_session_kind, "managed");
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

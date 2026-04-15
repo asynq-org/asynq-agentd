@@ -19,6 +19,7 @@ import { RuntimeDiscoveryService } from "./services/runtime-discovery-service.ts
 import { SummaryService } from "./services/summary-service.ts";
 import { initializeLogger } from "./logger.ts";
 import { UpdateService } from "./services/update-service.ts";
+import { ObservedResolutionService } from "./services/observed-resolution-service.ts";
 
 const port = Number(process.env.PORT ?? 7433);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -51,6 +52,7 @@ const adapters = new Map([
   ["opencode", new MockAgentAdapter()],
   ["custom", new MockAgentAdapter()],
 ]);
+const codexAdapter = adapters.get("codex");
 const scheduler = new SchedulerService(storage, tasks, sessions, config, adapters, undefined, undefined, terminalStreams);
 const recentWork = new RecentWorkService(storage, tasks, {
   claudePath: runtimePaths.claudePath,
@@ -70,6 +72,12 @@ const dashboard = new DashboardService({
   summaries,
   runtimes,
   updates,
+});
+const observedResolution = new ObservedResolutionService({
+  dashboard,
+  recentWork,
+  scheduler,
+  codexAdapter,
 });
 const activeConfig = config.get();
 const envTlsEnabled = process.env.ASYNQ_AGENTD_TLS_ENABLED === "1";
@@ -96,6 +104,7 @@ const server = createDaemonServer({
   terminalStreams,
   dashboard,
   updates,
+  observedResolution,
 }, {
   enabled: tlsEnabled,
   certPath: tlsCertPath,
