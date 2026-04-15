@@ -20,6 +20,7 @@ import { SummaryService } from "./services/summary-service.ts";
 import { initializeLogger } from "./logger.ts";
 import { UpdateService } from "./services/update-service.ts";
 import { ObservedResolutionService } from "./services/observed-resolution-service.ts";
+import { CodexGuiBridgeService } from "./services/codex-gui-bridge-service.ts";
 
 const port = Number(process.env.PORT ?? 7433);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -64,6 +65,7 @@ const recentWork = new RecentWorkService(storage, tasks, {
   },
 });
 const updates = new UpdateService();
+const codexGuiBridge = new CodexGuiBridgeService();
 const dashboard = new DashboardService({
   storage,
   tasks,
@@ -72,12 +74,15 @@ const dashboard = new DashboardService({
   summaries,
   runtimes,
   updates,
+  codexObservedBridgeAvailable: codexGuiBridge.isAvailable(),
+  codexResumeContinuationAvailable: Boolean(codexAdapter?.appendToConversation),
 });
 const observedResolution = new ObservedResolutionService({
   dashboard,
   recentWork,
   scheduler,
   codexAdapter,
+  codexBridge: codexGuiBridge,
 });
 const activeConfig = config.get();
 const envTlsEnabled = process.env.ASYNQ_AGENTD_TLS_ENABLED === "1";

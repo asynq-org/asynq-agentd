@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseTerminalControlMessage, pickSourceCodexSessionId } from "./server.ts";
+import { decodePathSegment, parseTerminalControlMessage, pickSourceCodexSessionId } from "./server.ts";
+
+test("decodePathSegment decodes URL-encoded approval ids", () => {
+  assert.equal(
+    decodePathSegment("observed-review%3A019d9169-ff7c-71d0-9ba2-82c2caebdf99"),
+    "observed-review:019d9169-ff7c-71d0-9ba2-82c2caebdf99",
+  );
+  assert.equal(decodePathSegment("%E0%A4%A"), "%E0%A4%A");
+});
 
 test("parseTerminalControlMessage accepts send_message payloads", () => {
   assert.deepEqual(

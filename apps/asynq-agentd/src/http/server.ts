@@ -192,6 +192,14 @@ function parseCsvParam(value: string | null): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
+export function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function notFound(res: ServerResponse): void {
   sendJson(res, 404, { error: "Not found" });
 }
@@ -753,7 +761,8 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
 
       const approvalMatch = path.match(/^\/approvals\/([^/]+)$/);
       if (method === "GET" && approvalMatch) {
-        const approval = services.dashboard.getApprovalDetail(approvalMatch[1], {
+        const approvalId = decodePathSegment(approvalMatch[1]);
+        const approval = services.dashboard.getApprovalDetail(approvalId, {
           app_version: clientAppVersion,
           min_supported_agentd_version: clientMinAgentdVersion,
         });
@@ -774,7 +783,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
           require_verification?: boolean;
         }>();
 
-        const approvalId = approvalMatch[1];
+        const approvalId = decodePathSegment(approvalMatch[1]);
         const observedRecentWorkId = parseObservedApprovalId(approvalId);
         if (observedRecentWorkId) {
           const strategy = normalizeResolutionStrategy(body.resolution_strategy) ?? "auto";

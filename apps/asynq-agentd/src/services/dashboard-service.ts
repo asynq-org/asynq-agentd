@@ -17,6 +17,8 @@ interface DashboardServiceOptions {
   summaries: SummaryService;
   runtimes: RuntimeDiscoveryService;
   updates: UpdateService;
+  codexObservedBridgeAvailable?: boolean;
+  codexResumeContinuationAvailable?: boolean;
 }
 
 type ObservedPendingReview = {
@@ -90,6 +92,8 @@ export class DashboardService {
   private readonly summaries: SummaryService;
   private readonly runtimes: RuntimeDiscoveryService;
   private readonly updates: UpdateService;
+  private readonly codexObservedBridgeAvailable: boolean;
+  private readonly codexResumeContinuationAvailable: boolean;
   private lastRecentWorkRefreshAt = 0;
 
   constructor(options: DashboardServiceOptions) {
@@ -100,6 +104,8 @@ export class DashboardService {
     this.summaries = options.summaries;
     this.runtimes = options.runtimes;
     this.updates = options.updates;
+    this.codexObservedBridgeAvailable = options.codexObservedBridgeAvailable ?? false;
+    this.codexResumeContinuationAvailable = options.codexResumeContinuationAvailable ?? false;
   }
 
   getOverview(client?: { app_version?: string; min_supported_agentd_version?: string }) {
@@ -573,6 +579,9 @@ export class DashboardService {
       : "Review the pending approval in the observed desktop session.";
     const takeoverSupport = this.assessObservedTakeoverSupport(record, pendingReview);
     const hasStructuredDiff = false;
+    const canResolveWithBridge = agentType === "codex" && this.codexObservedBridgeAvailable;
+    const canResumeContinuation = agentType === "codex" && this.codexResumeContinuationAvailable;
+    const canResolveInBuddy = canResolveWithBridge || canResumeContinuation;
 
     return {
       approval_id: this.getObservedApprovalId(record),
@@ -589,22 +598,32 @@ export class DashboardService {
       summary: record.summary,
       next_action: "open_observed_review",
       created_at: record.updated_at,
-      can_resolve: false,
+      can_resolve: canResolveInBuddy,
       review: {
         machine: "Observed desktop session",
         agent: agentType,
         branch: "Observed thread",
         project: this.projectName(record.project_path ?? "Linked project"),
         review_hint: pendingReview.context,
-        test_status: takeoverSupport.supported
-          ? "This approval can be taken over into a managed session."
+        test_status: canResolveWithBridge
+          ? "This approval can be resolved in the observed Codex session."
+          : canResumeContinuation
+          ? "Buddy can continue this Codex thread, but the original desktop prompt may remain open. Cancel that desktop prompt later instead of approving it."
+          : takeoverSupport.supported
+          ? agentType === "codex"
+            ? "Codex live approval needs a native bridge; Buddy will use managed takeover as fallback."
+            : "This approval can be taken over into a managed session."
           : (takeoverSupport.reason ?? "Resolve this permission prompt in the active desktop session."),
         stats: {
           files_changed: 0,
           lines_added: 0,
           lines_removed: 0,
         },
-        suggested_actions: [],
+        suggested_actions: canResolveWithBridge
+          ? ["Approve", "Reject"]
+          : canResumeContinuation
+          ? ["Continue in Codex", "Reject in Codex"]
+          : [],
         command: pendingReview.cmd,
         files: [],
         read_only: true,

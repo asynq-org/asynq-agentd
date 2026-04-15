@@ -3,6 +3,7 @@ import test from "node:test";
 import type { RecentWorkRecord, TaskRecord } from "../domain.ts";
 import {
   normalizeResolutionStrategy,
+  type ObservedApprovalBridge,
   ObservedResolutionService,
   parseObservedApprovalId,
 } from "./observed-resolution-service.ts";
@@ -63,6 +64,7 @@ test("observed resolution auto strategy resolves in place when verification succ
         relayCalls.push({ conversationId, prompt });
       },
     },
+    codexInPlaceBridgeAvailable: true,
     verificationTimeoutMs: 80,
     verificationPollIntervalMs: 10,
   });
@@ -82,6 +84,112 @@ test("observed resolution auto strategy resolves in place when verification succ
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0]?.conversationId, "recent_observed_1");
   assert.match(relayCalls[0]?.prompt ?? "", /Decision: APPROVED/);
+});
+
+test("observed resolution auto strategy resolves with Codex GUI bridge when verification succeeds", async () => {
+  const bridgeCalls: Array<{ decision: "approved" | "rejected"; action?: string }> = [];
+  let approvalCleared = false;
+  const bridge: ObservedApprovalBridge = {
+    isAvailable: () => true,
+    resolve: async (input) => {
+      bridgeCalls.push({
+        decision: input.decision,
+        action: input.approval?.action,
+      });
+      approvalCleared = true;
+    },
+  };
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => approvalCleared
+        ? undefined
+        : {
+            approval_id: "observed-review:recent_observed_bridge",
+            action: "Approve command: node cleanup.js",
+          },
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("recent_observed_bridge", false),
+      scan: () => {},
+      continueRecentWork: () => {
+        throw new Error("continueRecentWork should not be called when bridge succeeds");
+      },
+    } as never,
+    scheduler: {
+      tick: async () => {},
+    } as never,
+    codexBridge: bridge,
+    verificationTimeoutMs: 80,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:recent_observed_bridge",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "codex_gui_bridge");
+  assert.equal(result.resolution.status, "verified");
+  assert.equal(result.resolution.fallback_used, false);
+  assert.deepEqual(bridgeCalls, [{
+    decision: "approved",
+    action: "Approve command: node cleanup.js",
+  }]);
+});
+
+test("observed resolution auto strategy falls back to managed handoff when Codex GUI bridge fails", async () => {
+  let schedulerTicks = 0;
+  let capturedInstruction = "";
+  const bridge: ObservedApprovalBridge = {
+    isAvailable: () => true,
+    resolve: async () => {
+      throw new Error("codex_gui_bridge_button_not_found");
+    },
+  };
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => ({
+        approval_id: "observed-review:recent_observed_bridge_fallback",
+        action: "Approve command: node cleanup.js",
+      }),
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("recent_observed_bridge_fallback", true),
+      scan: () => {},
+      continueRecentWork: (_id: string, instruction?: string) => {
+        capturedInstruction = instruction ?? "";
+        return { id: "task_takeover_bridge_fallback" } as TaskRecord;
+      },
+    } as never,
+    scheduler: {
+      tick: async () => {
+        schedulerTicks += 1;
+      },
+    } as never,
+    codexBridge: bridge,
+    verificationTimeoutMs: 60,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:recent_observed_bridge_fallback",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "managed_handoff");
+  assert.equal(result.resolution.status, "queued");
+  assert.equal(result.resolution.fallback_used, true);
+  assert.equal(result.resolution.task_id, "task_takeover_bridge_fallback");
+  assert.equal(schedulerTicks, 1);
+  assert.match(capturedInstruction, /Take over the observed approval/i);
 });
 
 test("observed resolution auto strategy falls back to managed handoff when verification times out", async () => {
@@ -112,6 +220,7 @@ test("observed resolution auto strategy falls back to managed handoff when verif
       runTask: async () => {},
       appendToConversation: async () => {},
     },
+    codexInPlaceBridgeAvailable: true,
     verificationTimeoutMs: 60,
     verificationPollIntervalMs: 10,
   });
@@ -133,6 +242,56 @@ test("observed resolution auto strategy falls back to managed handoff when verif
   assert.equal(schedulerTicks, 1);
   assert.match(capturedInstruction, /Take over the observed approval/i);
   assert.match(capturedInstruction, /Operator note: Proceed, then report outcome\./i);
+});
+
+test("observed resolution auto strategy uses Codex resume continuation when no live bridge is available", async () => {
+  let relayCalls = 0;
+  let schedulerTicks = 0;
+  let relayPrompt = "";
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => ({
+        approval_id: "observed-review:recent_observed_default",
+      }),
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("recent_observed_default", true),
+      scan: () => {},
+      continueRecentWork: () => ({ id: "task_takeover_default" }) as TaskRecord,
+    } as never,
+    scheduler: {
+      tick: async () => {
+        schedulerTicks += 1;
+      },
+    } as never,
+    codexAdapter: {
+      name: "codex-cli",
+      runTask: async () => {},
+      appendToConversation: async (_conversationId: string, prompt: string) => {
+        relayCalls += 1;
+        relayPrompt = prompt;
+      },
+    },
+    verificationTimeoutMs: 60,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:recent_observed_default",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "codex_resume_continuation");
+  assert.equal(result.resolution.fallback_used, true);
+  assert.equal(result.resolution.fallback_reason, "live_bridge_unavailable_used_codex_resume_continuation");
+  assert.equal(relayCalls, 1);
+  assert.equal(schedulerTicks, 0);
+  assert.match(relayPrompt, /same-thread continuation/i);
+  assert.match(relayPrompt, /cancel that prompt instead of approving it/i);
 });
 
 test("observed resolution in_place strategy reports failure when in-place relay errors", async () => {
@@ -159,6 +318,7 @@ test("observed resolution in_place strategy reports failure when in-place relay 
         throw new Error("network failure");
       },
     },
+    codexInPlaceBridgeAvailable: true,
     verificationTimeoutMs: 60,
     verificationPollIntervalMs: 10,
   });
@@ -198,6 +358,7 @@ test("observed resolution in_place strategy fails when verification does not cle
       runTask: async () => {},
       appendToConversation: async () => {},
     },
+    codexInPlaceBridgeAvailable: true,
     verificationTimeoutMs: 60,
     verificationPollIntervalMs: 10,
   });

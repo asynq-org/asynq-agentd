@@ -548,6 +548,8 @@ test("dashboard service exposes observed Codex approval requests in attention re
   assert.equal(attention.items[0]?.can_resolve, false);
   assert.equal(attention.items[0]?.recent_work_id, "recent_observed_review");
   assert.equal(attention.items[0]?.review?.source_session_kind, "observed");
+  assert.deepEqual(attention.items[0]?.review?.suggested_actions, []);
+  assert.match(attention.items[0]?.review?.test_status ?? "", /native bridge/i);
 
   const approvalDetail = dashboard.getApprovalDetail("observed-review:recent_observed_review");
   assert.equal(approvalDetail?.review?.command, "node cleanup.js");
@@ -555,6 +557,114 @@ test("dashboard service exposes observed Codex approval requests in attention re
   const continueWorking = dashboard.getContinueWorking();
   const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_observed_review");
   assert.equal(observed?.observed_approval_id, "observed-review:recent_observed_review");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service exposes Codex observed bridge actions when bridge is available", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+    codexObservedBridgeAvailable: true,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_bridge_review",
+    source_path: "/tmp/observed-review.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed cleanup thread",
+    summary: "Waiting on an escalated cleanup command.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      pending_observed_review: {
+        action: "Approve command: node cleanup.js",
+        context: "Do you want me to delete the legacy managed-session rows from ~/.asynq-agentd?",
+        cmd: "node cleanup.js",
+      },
+    },
+  });
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items[0]?.approval_id, "observed-review:recent_observed_bridge_review");
+  assert.equal(attention.items[0]?.can_resolve, true);
+  assert.deepEqual(attention.items[0]?.review?.suggested_actions, ["Approve", "Reject"]);
+  assert.match(attention.items[0]?.review?.test_status ?? "", /resolved in the observed Codex session/i);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service exposes Codex resume continuation actions when bridge is unavailable", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+    codexResumeContinuationAvailable: true,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_observed_resume_review",
+    source_path: "/tmp/observed-review.jsonl",
+    project_path: "/tmp/demo",
+    title: "Observed cleanup thread",
+    summary: "Waiting on an escalated cleanup command.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      pending_observed_review: {
+        action: "Approve command: node cleanup.js",
+        context: "Do you want me to delete the legacy managed-session rows from ~/.asynq-agentd?",
+        cmd: "node cleanup.js",
+      },
+    },
+  });
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items[0]?.approval_id, "observed-review:recent_observed_resume_review");
+  assert.equal(attention.items[0]?.can_resolve, true);
+  assert.deepEqual(attention.items[0]?.review?.suggested_actions, ["Continue in Codex", "Reject in Codex"]);
+  assert.match(attention.items[0]?.review?.test_status ?? "", /desktop prompt may remain open/i);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });
@@ -977,6 +1087,7 @@ test("dashboard service marks observed approvals outside the workspace as deskto
   });
 
   const detail = dashboard.getApprovalDetail("observed-review:observed-outside-workspace");
+  assert.equal(detail?.can_resolve, false);
   assert.equal(detail?.review?.takeover_supported, false);
   assert.equal(detail?.review?.show_stats, false);
   assert.match(detail?.review?.takeover_reason ?? "", /outside the managed workspace/i);

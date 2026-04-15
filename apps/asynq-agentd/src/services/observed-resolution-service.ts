@@ -16,6 +16,15 @@ type ObservedApprovalDetail = {
   project_path?: string;
 };
 
+export type ObservedApprovalBridge = {
+  isAvailable(): boolean;
+  resolve(input: {
+    approval: ObservedApprovalDetail | undefined;
+    decision: "approved" | "rejected";
+    note?: string;
+  }): Promise<void>;
+};
+
 export type ResolveObservedApprovalInput = {
   approvalId: string;
   decision: "approved" | "rejected";
@@ -25,7 +34,7 @@ export type ResolveObservedApprovalInput = {
 };
 
 type ResolutionPayload = {
-  method: "in_place" | "managed_handoff" | "none";
+  method: "codex_gui_bridge" | "codex_resume_continuation" | "in_place" | "managed_handoff" | "none";
   status: "verified" | "queued" | "failed";
   fallback_used: boolean;
   fallback_reason?: string;
@@ -107,6 +116,9 @@ export class ObservedResolutionService {
   private readonly recentWork: RecentWorkService;
   private readonly scheduler: SchedulerService;
   private readonly codexAdapter?: AgentAdapter;
+  private readonly codexBridge?: ObservedApprovalBridge;
+  private readonly codexInPlaceBridgeAvailable: boolean;
+  private readonly codexResumeContinuationAvailable: boolean;
   private readonly verificationTimeoutMs: number;
   private readonly verificationPollIntervalMs: number;
 
@@ -115,6 +127,9 @@ export class ObservedResolutionService {
     recentWork: RecentWorkService;
     scheduler: SchedulerService;
     codexAdapter?: AgentAdapter;
+    codexBridge?: ObservedApprovalBridge;
+    codexInPlaceBridgeAvailable?: boolean;
+    codexResumeContinuationAvailable?: boolean;
     verificationTimeoutMs?: number;
     verificationPollIntervalMs?: number;
   }) {
@@ -122,6 +137,9 @@ export class ObservedResolutionService {
     this.recentWork = input.recentWork;
     this.scheduler = input.scheduler;
     this.codexAdapter = input.codexAdapter;
+    this.codexBridge = input.codexBridge;
+    this.codexInPlaceBridgeAvailable = input.codexInPlaceBridgeAvailable ?? false;
+    this.codexResumeContinuationAvailable = input.codexResumeContinuationAvailable ?? Boolean(input.codexAdapter?.appendToConversation);
     this.verificationTimeoutMs = Math.max(50, input.verificationTimeoutMs ?? 8000);
     this.verificationPollIntervalMs = Math.max(10, input.verificationPollIntervalMs ?? 400);
   }
@@ -140,10 +158,81 @@ export class ObservedResolutionService {
 
     const runtime = inferRuntimeFromRecentWork(record);
     const strategy = input.resolutionStrategy;
-    const inPlaceSupported = runtime === "codex" && Boolean(this.codexAdapter?.appendToConversation);
-    const inPlaceUnsupportedReason = `in_place_not_supported_for_runtime:${runtime}`;
+    const bridgeSupported = runtime === "codex" && Boolean(this.codexBridge?.isAvailable());
+    const inPlaceSupported = runtime === "codex"
+      && this.codexInPlaceBridgeAvailable
+      && Boolean(this.codexAdapter?.appendToConversation);
+    const resumeContinuationSupported = runtime === "codex"
+      && this.codexResumeContinuationAvailable
+      && Boolean(this.codexAdapter?.appendToConversation);
+    const inPlaceUnsupportedReason = bridgeSupported
+      ? "legacy_in_place_relay_disabled"
+      : `in_place_not_supported_for_runtime:${runtime}`;
+    let attemptedLiveBridge = false;
 
-    if (strategy === "in_place" && !inPlaceSupported) {
+    if ((strategy === "auto" || strategy === "in_place") && bridgeSupported) {
+      attemptedLiveBridge = true;
+      try {
+        await this.codexBridge!.resolve({
+          approval,
+          decision: input.decision,
+          note: input.note,
+        });
+
+        const verification = input.requireVerification
+          ? await this.verifyObservedResolution(input.approvalId, recentWorkId)
+          : { verified: true };
+
+        if (verification.verified) {
+          return {
+            ok: true,
+            approval_id: input.approvalId,
+            resolution: {
+              method: "codex_gui_bridge",
+              status: "verified",
+              fallback_used: false,
+              strategy_requested: strategy,
+              runtime,
+              recent_work_id: recentWorkId,
+            },
+          };
+        }
+
+        if (strategy === "in_place" || input.decision === "rejected") {
+          return {
+            ok: false,
+            approval_id: input.approvalId,
+            resolution: {
+              method: "none",
+              status: "failed",
+              fallback_used: false,
+              fallback_reason: `codex_gui_bridge_verification_failed:${verification.reason}`,
+              strategy_requested: strategy,
+              runtime,
+              recent_work_id: recentWorkId,
+            },
+          };
+        }
+      } catch (error) {
+        if (strategy === "in_place" || input.decision === "rejected") {
+          return {
+            ok: false,
+            approval_id: input.approvalId,
+            resolution: {
+              method: "none",
+              status: "failed",
+              fallback_used: false,
+              fallback_reason: `codex_gui_bridge_failed:${error instanceof Error ? error.message : "unknown_error"}`,
+              strategy_requested: strategy,
+              runtime,
+              recent_work_id: recentWorkId,
+            },
+          };
+        }
+      }
+    }
+
+    if (strategy === "in_place" && !bridgeSupported && !inPlaceSupported) {
       return {
         ok: false,
         approval_id: input.approvalId,
@@ -157,6 +246,52 @@ export class ObservedResolutionService {
           recent_work_id: recentWorkId,
         },
       };
+    }
+
+    if (strategy === "auto" && resumeContinuationSupported && !inPlaceSupported) {
+      const prompt = this.buildCodexResumeContinuationPrompt(approval, input.decision, input.note);
+      try {
+        await this.codexAdapter!.appendToConversation!(
+          recentWorkId,
+          prompt,
+          {
+            projectPath: record.project_path,
+            modelPreference: undefined,
+          },
+        );
+
+        return {
+          ok: true,
+          approval_id: input.approvalId,
+          resolution: {
+            method: "codex_resume_continuation",
+            status: "verified",
+            fallback_used: attemptedLiveBridge || !bridgeSupported,
+            fallback_reason: attemptedLiveBridge
+              ? "live_bridge_unverified_used_codex_resume_continuation"
+              : "live_bridge_unavailable_used_codex_resume_continuation",
+            strategy_requested: strategy,
+            runtime,
+            recent_work_id: recentWorkId,
+          },
+        };
+      } catch (error) {
+        if (strategy === "in_place" || input.decision === "rejected") {
+          return {
+            ok: false,
+            approval_id: input.approvalId,
+            resolution: {
+              method: "none",
+              status: "failed",
+              fallback_used: false,
+              fallback_reason: `codex_resume_continuation_failed:${error instanceof Error ? error.message : "unknown_error"}`,
+              strategy_requested: strategy,
+              runtime,
+              recent_work_id: recentWorkId,
+            },
+          };
+        }
+      }
     }
 
     if ((strategy === "auto" || strategy === "in_place") && inPlaceSupported) {
@@ -342,6 +477,33 @@ export class ObservedResolutionService {
         ? "Resolve the pending review in this same thread and continue the originally blocked work."
         : "Reject the pending review in this same thread, do not run the blocked action, and provide a safe alternative.",
       "If the review is already resolved, confirm current status briefly.",
+      "Return a short status update only.",
+    ].filter((line): line is string => Boolean(line)).join("\n");
+  }
+
+  private buildCodexResumeContinuationPrompt(
+    approval: ObservedApprovalDetail | undefined,
+    decision: "approved" | "rejected",
+    note?: string,
+  ): string {
+    const action = pickString(approval?.action) ?? "Pending observed review";
+    const context = pickString(approval?.context) ?? "No additional context was captured.";
+    const operatorNote = pickString(note);
+
+    return [
+      "Buddy operator review decision for this Codex thread.",
+      "",
+      "Important: this is a same-thread continuation, not a live click on the desktop approval prompt.",
+      "The original desktop approval prompt may remain open. When the operator returns to the computer, they should cancel that prompt instead of approving it.",
+      "",
+      `Decision: ${decision.toUpperCase()}`,
+      `Blocked action: ${action}`,
+      `Context: ${context}`,
+      operatorNote ? `Operator note: ${operatorNote}` : undefined,
+      "",
+      decision === "approved"
+        ? "Continue the work in this same Codex thread. If the blocked command is still the correct and safe next step, run the equivalent operation now and report the actual outcome. Avoid duplicating side effects if the operation already appears completed."
+        : "Treat the blocked action as rejected. Do not run it. Continue only with a safe alternative plan or a concise explanation of what remains blocked.",
       "Return a short status update only.",
     ].filter((line): line is string => Boolean(line)).join("\n");
   }
