@@ -126,6 +126,73 @@ export class RecentWorkService {
     return this.storage.getRecentWork(id);
   }
 
+  setContinuationApproval(
+    id: string,
+    approval: { action: string; context: string; cmd?: string; detected_at?: string },
+  ): RecentWorkRecord {
+    const record = this.get(id);
+    if (!record) {
+      throw new Error(`Recent work ${id} not found`);
+    }
+
+    const updated: RecentWorkRecord = {
+      ...record,
+      updated_at: nowIso(),
+      metadata: {
+        ...(record.metadata ?? {}),
+        pending_continuation_review: {
+          ...approval,
+          detected_at: approval.detected_at ?? nowIso(),
+          source: "codex_resume_continuation",
+        },
+      },
+    };
+    this.storage.upsertRecentWork(updated);
+    this.publishRecentWorkUpdate(updated, record);
+    this.onRecentWorkUpdated?.(updated);
+    return updated;
+  }
+
+  clearContinuationApproval(id: string): RecentWorkRecord | undefined {
+    const record = this.get(id);
+    if (!record) {
+      return undefined;
+    }
+
+    const metadata = { ...(record.metadata ?? {}) };
+    delete metadata.pending_continuation_review;
+
+    const updated: RecentWorkRecord = {
+      ...record,
+      updated_at: nowIso(),
+      metadata,
+    };
+    this.storage.upsertRecentWork(updated);
+    this.publishRecentWorkUpdate(updated, record);
+    this.onRecentWorkUpdated?.(updated);
+    return updated;
+  }
+
+  markResumeContinuationResolved(id: string): RecentWorkRecord | undefined {
+    const record = this.clearContinuationApproval(id) ?? this.get(id);
+    if (!record) {
+      return undefined;
+    }
+
+    const updated: RecentWorkRecord = {
+      ...record,
+      updated_at: nowIso(),
+      metadata: {
+        ...(record.metadata ?? {}),
+        resume_continuation_resolved_at: nowIso(),
+      },
+    };
+    this.storage.upsertRecentWork(updated);
+    this.publishRecentWorkUpdate(updated, record);
+    this.onRecentWorkUpdated?.(updated);
+    return updated;
+  }
+
   scan(): RecentWorkRecord[] {
     const discovered: RecentWorkRecord[] = [];
     const changed: RecentWorkRecord[] = [];
@@ -1010,7 +1077,13 @@ export class RecentWorkService {
     let lastTaskCompletedIndex = -1;
     let lastContentIndex = -1;
     let inManagedHandoffTurn = false;
-    const pendingApprovalRequests = new Map<string, { action: string; context: string; cmd?: string; detected_at?: string }>();
+    const pendingApprovalRequests = new Map<string, {
+      action: string;
+      context: string;
+      cmd?: string;
+      detected_at?: string;
+      success_checks?: TakeoverSuccessCheck[];
+    }>();
     const filesModified = new Set<string>();
 
     for (const [lineIndex, line] of lines.entries()) {
@@ -1919,27 +1992,27 @@ export class RecentWorkService {
       return undefined;
     }
 
-    const checks: TakeoverSuccessCheck[] = [{
-      kind: "command_exit_zero",
-      cmd: normalized,
-    }];
-
     const targetPath = this.inferTargetPath(normalized);
     if (targetPath) {
-      checks.push({
+      return [{
         kind: "path_exists",
         path: targetPath.path,
         path_type: targetPath.pathType,
-      });
+      }];
     }
 
-    return checks;
+    return undefined;
   }
 
   private inferTargetPath(command: string): { path: string; pathType: "file" | "directory" | "any" } | undefined {
     const tokens = this.tokenizeShellWords(command);
     if (tokens.length < 2) {
       return undefined;
+    }
+
+    const redirectionTarget = this.inferShellRedirectionTarget(tokens);
+    if (redirectionTarget) {
+      return redirectionTarget;
     }
 
     const executable = basename(tokens[0] ?? "").toLowerCase();
@@ -1960,6 +2033,21 @@ export class RecentWorkService {
 
     if (executable === "mkdir") {
       return { path: resolvedTarget, pathType: "directory" };
+    }
+
+    return undefined;
+  }
+
+  private inferShellRedirectionTarget(tokens: string[]): { path: string; pathType: "file" } | undefined {
+    const redirectionOperators = new Set([">", ">>", ">|", "1>", "1>>", "2>", "2>>", "&>", "&>>"]);
+    for (let index = tokens.length - 2; index >= 0; index -= 1) {
+      const token = tokens[index];
+      if (!redirectionOperators.has(token)) {
+        continue;
+      }
+
+      const resolvedTarget = this.normalizeShellPath(tokens[index + 1]);
+      return resolvedTarget ? { path: resolvedTarget, pathType: "file" } : undefined;
     }
 
     return undefined;

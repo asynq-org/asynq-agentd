@@ -6,6 +6,10 @@ export interface AdapterHooks {
   onTerminalData: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
+export interface AppendConversationResult {
+  lastMessage?: string;
+}
+
 export interface AgentAdapter {
   readonly name: string;
   runTask(task: TaskRecord, session: SessionRecord, hooks: AdapterHooks): Promise<void>;
@@ -16,7 +20,7 @@ export interface AgentAdapter {
       projectPath?: string;
       modelPreference?: string;
     },
-  ): Promise<void>;
+  ): Promise<void | AppendConversationResult>;
   canResumeTask?(task: TaskRecord, session: SessionRecord): boolean;
   writeTerminalInput?(sessionId: string, input: string): void;
   resizeTerminal?(sessionId: string, cols: number, rows: number): void;

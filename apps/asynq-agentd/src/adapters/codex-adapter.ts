@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { AgentAdapter, AdapterHooks } from "./agent-adapter.ts";
+import type { AgentAdapter, AdapterHooks, AppendConversationResult } from "./agent-adapter.ts";
 import type { ActivityPayload, SessionRecord, TaskRecord } from "../domain.ts";
 import { parseJsonSafe } from "../utils/json.ts";
 import { createTerminalSpawnPlan } from "../utils/terminal-spawn.ts";
@@ -154,14 +154,14 @@ export class CodexCliAdapter implements AgentAdapter {
       projectPath?: string;
       modelPreference?: string;
     },
-  ): Promise<void> {
+  ): Promise<AppendConversationResult> {
     const commandArgs = [
       ...this.binArgs,
       ...this.buildResumeArgs(prompt, conversationId, options?.modelPreference),
     ];
     const spawnPlan = createTerminalSpawnPlan(this.binPath, commandArgs);
 
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<AppendConversationResult>((resolve, reject) => {
       const child = this.spawnCodexProcess(
         spawnPlan.command,
         spawnPlan.args,
@@ -171,8 +171,38 @@ export class CodexCliAdapter implements AgentAdapter {
         child.stdin.end();
       }
       const stderrChunks: string[] = [];
+      let stdoutBuffer = "";
+      let lastMessage: string | undefined;
 
-      child.stdout.on("data", () => {});
+      const flushStdout = (chunk: string, final = false) => {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split("\n");
+        if (!final) {
+          stdoutBuffer = lines.pop() ?? "";
+        } else {
+          stdoutBuffer = "";
+        }
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+
+          const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
+          const item = entry?.item && typeof entry.item === "object"
+            ? entry.item as Record<string, unknown>
+            : undefined;
+          if (entry?.type === "item.completed" && item?.type === "agent_message" && typeof item.text === "string") {
+            lastMessage = item.text;
+          }
+        }
+      };
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        flushStdout(chunk, false);
+      });
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
         stderrChunks.push(chunk);
@@ -180,8 +210,9 @@ export class CodexCliAdapter implements AgentAdapter {
 
       child.on("error", reject);
       child.on("close", (code) => {
+        flushStdout("", true);
         if (code === 0) {
-          resolve();
+          resolve({ lastMessage });
           return;
         }
 

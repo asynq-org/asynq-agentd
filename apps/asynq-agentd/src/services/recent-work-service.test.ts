@@ -769,10 +769,112 @@ test("recent work scan tracks pending observed Codex approval requests", () => {
     String((record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.detected_at ?? "").length > 0,
   );
   assert.equal(
-    ((record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks as Array<Record<string, unknown>> | undefined)?.[0]?.kind,
-    "command_exit_zero",
+    (record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks,
+    undefined,
   );
   assert.equal(preview?.activity_preview?.[0]?.payload.type, "approval_requested");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan infers path success checks for shell redirection approvals", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-codex-redirect-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = resolve(root, ".codex");
+  const sessionsRoot = resolve(codexRoot, "sessions", "2026", "03", "25");
+  mkdirSync(sessionsRoot, { recursive: true });
+  const sessionPath = join(sessionsRoot, "observed-redirect.jsonl");
+  const outputPath = join(root, "observed-review-test.txt");
+  const command = `date > ${outputPath}`;
+
+  writeFileSync(sessionPath, [
+    JSON.stringify({
+      timestamp: "2026-03-25T10:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: "observed-redirect",
+        cwd: root,
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-25T10:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "call_observed_redirect",
+        arguments: JSON.stringify({
+          cmd: command,
+          sandbox_permissions: "require_escalated",
+          justification: "Allow running the observed review test command.",
+        }),
+      },
+    }),
+    "",
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const record = recentWork.scan().find((item) => item.id === "observed-redirect");
+  const successChecks = (record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks as Array<Record<string, unknown>> | undefined;
+
+  assert.equal(successChecks?.[0]?.kind, "path_exists");
+  assert.equal(successChecks?.[0]?.path, outputPath);
+  assert.equal(successChecks?.[0]?.path_type, "file");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("recent work scan avoids hard success checks for generic observed approvals", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-codex-generic-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const codexRoot = resolve(root, ".codex");
+  const sessionsRoot = resolve(codexRoot, "sessions", "2026", "03", "25");
+  mkdirSync(sessionsRoot, { recursive: true });
+  const sessionPath = join(sessionsRoot, "observed-generic.jsonl");
+
+  writeFileSync(sessionPath, [
+    JSON.stringify({
+      timestamp: "2026-03-25T10:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: "observed-generic",
+        cwd: root,
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-03-25T10:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        call_id: "call_observed_generic",
+        arguments: JSON.stringify({
+          cmd: "curl -k -s https://127.0.0.1:7433/health",
+          sandbox_permissions: "require_escalated",
+          justification: "Allow checking the local daemon health endpoint.",
+        }),
+      },
+    }),
+    "",
+  ].join("\n"));
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, ".claude-empty"),
+    codexPath: codexRoot,
+  });
+  const record = recentWork.scan().find((item) => item.id === "observed-generic");
+
+  assert.equal(
+    (record?.metadata?.pending_observed_review as Record<string, unknown> | undefined)?.success_checks,
+    undefined,
+  );
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

@@ -608,7 +608,7 @@ export class DashboardService {
         test_status: canResolveWithBridge
           ? "This approval can be resolved in the observed Codex session."
           : canResumeContinuation
-          ? "Buddy can continue this Codex thread, but the original desktop prompt may remain open. Cancel that desktop prompt later instead of approving it."
+          ? "Buddy can continue this Codex thread, but the original desktop prompt may remain open. When you return to Codex Desktop, cancel the old approval prompt instead of approving it. If Codex retries it, cancel the retry too, then send a new message to continue with normal approvals."
           : takeoverSupport.supported
           ? agentType === "codex"
             ? "Codex live approval needs a native bridge; Buddy will use managed takeover as fallback."
@@ -748,6 +748,13 @@ export class DashboardService {
       return false;
     }
 
+    if (
+      record.metadata?.resume_continuation_resolved_at
+      && !record.metadata?.pending_continuation_review
+    ) {
+      return true;
+    }
+
     const takeover = this.findLinkedManagedTakeover(record);
     if (!takeover || takeover.status === "failed") {
       return false;
@@ -758,7 +765,7 @@ export class DashboardService {
   }
 
   private pickObservedPendingReview(record: RecentWorkRecord): { action: string; context: string; cmd?: string; detected_at?: string } | undefined {
-    const pending = record.metadata?.pending_observed_review;
+    const pending = record.metadata?.pending_continuation_review ?? record.metadata?.pending_observed_review;
     if (!pending || typeof pending !== "object") {
       return undefined;
     }

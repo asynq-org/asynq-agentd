@@ -259,6 +259,10 @@ test("observed resolution auto strategy uses Codex resume continuation when no l
       get: () => createObservedRecentWork("recent_observed_default", true),
       scan: () => {},
       continueRecentWork: () => ({ id: "task_takeover_default" }) as TaskRecord,
+      markResumeContinuationResolved: () => undefined,
+      setContinuationApproval: () => {
+        throw new Error("setContinuationApproval should not be called without NEXT_APPROVAL_REQUIRED");
+      },
     } as never,
     scheduler: {
       tick: async () => {
@@ -292,6 +296,71 @@ test("observed resolution auto strategy uses Codex resume continuation when no l
   assert.equal(schedulerTicks, 0);
   assert.match(relayPrompt, /same-thread continuation/i);
   assert.match(relayPrompt, /cancel that prompt instead of approving it/i);
+  assert.match(relayPrompt, /Do not retry or re-request the original desktop approval/i);
+  assert.match(relayPrompt, /approval_policy=never only for this run/i);
+  assert.match(relayPrompt, /normal interactive approval settings/i);
+});
+
+test("observed resolution stores next continuation approval from Codex resume output", async () => {
+  let capturedApproval: { action: string; context: string; cmd?: string } | undefined;
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => ({
+        approval_id: "observed-review:recent_observed_next",
+      }),
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("recent_observed_next", true),
+      scan: () => {},
+      continueRecentWork: () => {
+        throw new Error("continueRecentWork should not be called for Codex resume continuation");
+      },
+      markResumeContinuationResolved: () => {
+        throw new Error("markResumeContinuationResolved should not be called when next approval is required");
+      },
+      setContinuationApproval: (_id: string, approval: { action: string; context: string; cmd?: string }) => {
+        capturedApproval = approval;
+      },
+    } as never,
+    scheduler: {
+      tick: async () => {},
+    } as never,
+    codexAdapter: {
+      name: "codex-cli",
+      runTask: async () => {},
+      appendToConversation: async () => ({
+        lastMessage: [
+          "First step completed.",
+          "NEXT_APPROVAL_REQUIRED",
+          "Action: Approve command: touch /tmp/second-file",
+          "Context: Need to create the second file requested by the test.",
+          "Command: touch /tmp/second-file",
+        ].join("\n"),
+      }),
+    },
+    verificationTimeoutMs: 60,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:recent_observed_next",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "codex_resume_continuation");
+  assert.deepEqual(capturedApproval && {
+    action: capturedApproval.action,
+    context: capturedApproval.context,
+    cmd: capturedApproval.cmd,
+  }, {
+    action: "Approve command: touch /tmp/second-file",
+    context: "Need to create the second file requested by the test.",
+    cmd: "touch /tmp/second-file",
+  });
 });
 
 test("observed resolution in_place strategy reports failure when in-place relay errors", async () => {

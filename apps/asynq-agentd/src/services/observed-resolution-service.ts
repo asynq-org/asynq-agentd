@@ -251,7 +251,7 @@ export class ObservedResolutionService {
     if (strategy === "auto" && resumeContinuationSupported && !inPlaceSupported) {
       const prompt = this.buildCodexResumeContinuationPrompt(approval, input.decision, input.note);
       try {
-        await this.codexAdapter!.appendToConversation!(
+        const appendResult = await this.codexAdapter!.appendToConversation!(
           recentWorkId,
           prompt,
           {
@@ -259,6 +259,12 @@ export class ObservedResolutionService {
             modelPreference: undefined,
           },
         );
+        const nextApproval = this.parseNextContinuationApproval(appendResult?.lastMessage);
+        if (nextApproval) {
+          this.recentWork.setContinuationApproval(recentWorkId, nextApproval);
+        } else {
+          this.recentWork.markResumeContinuationResolved(recentWorkId);
+        }
 
         return {
           ok: true,
@@ -495,6 +501,13 @@ export class ObservedResolutionService {
       "",
       "Important: this is a same-thread continuation, not a live click on the desktop approval prompt.",
       "The original desktop approval prompt may remain open. When the operator returns to the computer, they should cancel that prompt instead of approving it.",
+      "Do not retry or re-request the original desktop approval after this headless continuation. If the operation is already completed or rejected here, leave the old desktop approval for the operator to cancel.",
+      "This headless continuation may have approval_policy=never only for this run. Do not assume future turns sent from Codex Desktop have the same policy; the Desktop app may use its normal interactive approval settings again.",
+      "You may perform the approved blocked action and safe read-only verification. If another permission-sensitive action is required, do not run it. Stop and end your response with this exact block:",
+      "NEXT_APPROVAL_REQUIRED",
+      "Action: <short approval title>",
+      "Context: <why this next permission-sensitive action is needed>",
+      "Command: <exact command if applicable, otherwise omit this line>",
       "",
       `Decision: ${decision.toUpperCase()}`,
       `Blocked action: ${action}`,
@@ -506,5 +519,32 @@ export class ObservedResolutionService {
         : "Treat the blocked action as rejected. Do not run it. Continue only with a safe alternative plan or a concise explanation of what remains blocked.",
       "Return a short status update only.",
     ].filter((line): line is string => Boolean(line)).join("\n");
+  }
+
+  private parseNextContinuationApproval(message: string | undefined): { action: string; context: string; cmd?: string; detected_at?: string } | undefined {
+    if (!message || !/\bNEXT_APPROVAL_REQUIRED\b/i.test(message)) {
+      return undefined;
+    }
+
+    const afterMarker = message.split(/NEXT_APPROVAL_REQUIRED/i).at(-1) ?? "";
+    const action = this.pickLabeledLine(afterMarker, "Action");
+    const context = this.pickLabeledLine(afterMarker, "Context");
+    const command = this.pickLabeledLine(afterMarker, "Command");
+    if (!action || !context) {
+      return undefined;
+    }
+
+    return {
+      action,
+      context,
+      cmd: command,
+      detected_at: new Date().toISOString(),
+    };
+  }
+
+  private pickLabeledLine(text: string, label: string): string | undefined {
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = text.match(new RegExp(`^\\s*${escapedLabel}:\\s*(.+?)\\s*$`, "im"));
+    return pickString(match?.[1]);
   }
 }
