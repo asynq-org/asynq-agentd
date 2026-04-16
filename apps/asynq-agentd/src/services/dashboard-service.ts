@@ -19,6 +19,7 @@ interface DashboardServiceOptions {
   updates: UpdateService;
   codexObservedBridgeAvailable?: boolean;
   codexResumeContinuationAvailable?: boolean;
+  claudeResumeContinuationAvailable?: boolean;
 }
 
 type ObservedPendingReview = {
@@ -94,6 +95,7 @@ export class DashboardService {
   private readonly updates: UpdateService;
   private readonly codexObservedBridgeAvailable: boolean;
   private readonly codexResumeContinuationAvailable: boolean;
+  private readonly claudeResumeContinuationAvailable: boolean;
   private lastRecentWorkRefreshAt = 0;
 
   constructor(options: DashboardServiceOptions) {
@@ -106,6 +108,7 @@ export class DashboardService {
     this.updates = options.updates;
     this.codexObservedBridgeAvailable = options.codexObservedBridgeAvailable ?? false;
     this.codexResumeContinuationAvailable = options.codexResumeContinuationAvailable ?? false;
+    this.claudeResumeContinuationAvailable = options.claudeResumeContinuationAvailable ?? false;
   }
 
   getOverview(client?: { app_version?: string; min_supported_agentd_version?: string }) {
@@ -580,7 +583,10 @@ export class DashboardService {
     const takeoverSupport = this.assessObservedTakeoverSupport(record, pendingReview);
     const hasStructuredDiff = false;
     const canResolveWithBridge = agentType === "codex" && this.codexObservedBridgeAvailable;
-    const canResumeContinuation = agentType === "codex" && this.codexResumeContinuationAvailable;
+    const canResumeContinuation = agentType === "codex"
+      ? this.codexResumeContinuationAvailable
+      : agentType === "claude-code" && this.claudeResumeContinuationAvailable;
+    const runtimeLabel = agentType === "claude-code" ? "Claude Code" : "Codex";
     const canResolveInBuddy = canResolveWithBridge || canResumeContinuation;
 
     return {
@@ -608,7 +614,7 @@ export class DashboardService {
         test_status: canResolveWithBridge
           ? "This approval can be resolved in the observed Codex session."
           : canResumeContinuation
-          ? "Buddy can continue this Codex thread, but the original desktop prompt may remain open. When you return to Codex Desktop, cancel the old approval prompt instead of approving it. If Codex retries it, cancel the retry too, then send a new message to continue with normal approvals."
+          ? `Buddy can continue this ${runtimeLabel} thread, but the original desktop prompt may remain open. When you return to ${runtimeLabel}, cancel the old approval prompt instead of approving it. If ${runtimeLabel} retries it, cancel the retry too, then send a new message to continue with normal approvals.`
           : takeoverSupport.supported
           ? agentType === "codex"
             ? "Codex live approval needs a native bridge; Buddy will use managed takeover as fallback."
@@ -622,7 +628,7 @@ export class DashboardService {
         suggested_actions: canResolveWithBridge
           ? ["Approve", "Reject"]
           : canResumeContinuation
-          ? ["Continue in Codex", "Reject in Codex"]
+          ? ["Resume", "Reject"]
           : [],
         command: pendingReview.cmd,
         files: [],

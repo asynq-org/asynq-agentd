@@ -317,6 +317,14 @@ export class CodexCliAdapter implements AgentAdapter {
       lines.push(`Validation command: ${task.context.test_command}`);
     }
 
+    if (task.context?.recurring_history?.length) {
+      lines.push([
+        "Recurring task history (compact, newest last):",
+        ...task.context.recurring_history.map((item) => `- ${item.run_at} ${item.status}: ${item.summary}`),
+        "Use this history to avoid duplicate work and to continue the recurring task coherently.",
+      ].join("\n"));
+    }
+
     if (task.context?.observed_takeover) {
       const takeover = task.context.observed_takeover;
       lines.push([

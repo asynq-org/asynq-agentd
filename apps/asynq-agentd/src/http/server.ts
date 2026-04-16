@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { createServer as createHttpListener, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createServer as createHttpsListener, type Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
-import { resolve } from "node:path";
+import { extname, resolve } from "node:path";
+import { homedir } from "node:os";
 import type { DaemonConfig } from "../domain.ts";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { SessionService } from "../services/session-service.ts";
@@ -57,6 +58,24 @@ interface MarkdownExportInput {
 interface OpenExportInput {
   path?: string;
   reveal?: boolean;
+}
+
+interface ImageAttachmentInput {
+  name?: string;
+  mime_type?: string;
+  base64?: string;
+  width?: number;
+  height?: number;
+  size?: number;
+}
+
+interface StoredImageAttachment {
+  name: string;
+  mimeType: string;
+  path: string;
+  width?: number;
+  height?: number;
+  size?: number;
 }
 
 function isPublicRoute(method: string, path: string): boolean {
@@ -181,6 +200,82 @@ function parsePositiveInt(value: string | null): number | undefined {
   }
 
   return parsed;
+}
+
+function sanitizeAttachmentName(value: string | undefined, index: number, mimeType: string): string {
+  const fallbackExt = mimeTypeToExtension(mimeType);
+  const trimmed = value?.trim() || `screenshot-${index + 1}${fallbackExt}`;
+  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
+  const withExtension = extname(cleaned) ? cleaned : `${cleaned}${fallbackExt}`;
+  return `${String(index + 1).padStart(2, "0")}-${withExtension}`.slice(0, 120);
+}
+
+function mimeTypeToExtension(mimeType: string): string {
+  if (mimeType === "image/png") {
+    return ".png";
+  }
+  if (mimeType === "image/webp") {
+    return ".webp";
+  }
+  if (mimeType === "image/gif") {
+    return ".gif";
+  }
+  return ".jpg";
+}
+
+function storeImageAttachments(scope: string, attachments?: ImageAttachmentInput[]): StoredImageAttachment[] {
+  if (!attachments?.length) {
+    return [];
+  }
+
+  const root = resolve(homedir(), ".asynq-agentd", "attachments", scope);
+  mkdirSync(root, { recursive: true });
+
+  return attachments.flatMap((attachment, index) => {
+    const base64 = pickString(attachment.base64)?.replace(/^data:[^;]+;base64,/, "");
+    if (!base64) {
+      return [];
+    }
+
+    const mimeType = pickString(attachment.mime_type) ?? "image/jpeg";
+    const name = sanitizeAttachmentName(pickString(attachment.name), index, mimeType);
+    const targetPath = resolve(root, name);
+    writeFileSync(targetPath, Buffer.from(base64, "base64"));
+    return [{
+      name,
+      mimeType,
+      path: targetPath,
+      width: typeof attachment.width === "number" ? attachment.width : undefined,
+      height: typeof attachment.height === "number" ? attachment.height : undefined,
+      size: typeof attachment.size === "number" ? attachment.size : undefined,
+    }];
+  });
+}
+
+function buildAttachmentContext(attachments: StoredImageAttachment[]): string | undefined {
+  if (attachments.length === 0) {
+    return undefined;
+  }
+
+  return [
+    "Attached screenshots are saved locally on disk. Inspect them before acting:",
+    ...attachments.map((attachment, index) => {
+      const details = [
+        attachment.mimeType,
+        attachment.width && attachment.height ? `${attachment.width}x${attachment.height}` : undefined,
+      ].filter(Boolean).join(", ");
+      return `- Screenshot ${index + 1}: ${attachment.path}${details ? ` (${details})` : ""}`;
+    }),
+  ].join("\n");
+}
+
+function appendAttachmentContext(message: string, attachments: StoredImageAttachment[]): string {
+  const attachmentContext = buildAttachmentContext(attachments);
+  if (!attachmentContext) {
+    return message;
+  }
+
+  return `${message.trim()}\n\n${attachmentContext}`.trim();
 }
 
 function parseCsvParam(value: string | null): string[] | undefined {
@@ -562,15 +657,21 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
 
       const sessionMessageMatch = path.match(/^\/sessions\/([^/]+)\/message$/);
       if (method === "POST" && sessionMessageMatch) {
-        const body = await readBody<{ message?: string }>();
+        const body = await readBody<{ message?: string; attachments?: ImageAttachmentInput[] }>();
         const session = services.sessions.getRecord(sessionMessageMatch[1]);
         if (!session) {
           sendNotFound();
           return;
         }
 
+        const attachments = storeImageAttachments(`sessions/${session.id}/${Date.now()}`, body.attachments);
+        const enrichedMessage = appendAttachmentContext(
+          body.message ?? "Continue from the latest state and keep going.",
+          attachments,
+        );
+
         if (session.state === "working" || session.state === "waiting_approval") {
-          services.sessions.sendMessage(session.id, body.message ?? "");
+          services.sessions.sendMessage(session.id, enrichedMessage);
           send(202, { ok: true, mode: "live" });
           return;
         }
@@ -586,7 +687,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
           title: session.title,
           description: buildContinuationDescription(
             sessionDetail,
-            body.message,
+            enrichedMessage,
             sourceRecentWork
               ? {
                   title: sourceRecentWork.title,
@@ -632,8 +733,12 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
       }
 
       if (method === "POST" && path === "/tasks") {
-        const body = await readBody<CreateTaskInput>();
-        const task = services.tasks.create(body);
+        const body = await readBody<CreateTaskInput & { attachments?: ImageAttachmentInput[] }>();
+        const attachments = storeImageAttachments(`tasks/${Date.now()}`, body.attachments);
+        const task = services.tasks.create({
+          ...body,
+          description: appendAttachmentContext(body.description, attachments),
+        });
         void services.scheduler.tick();
         send(201, task);
         return;
@@ -865,8 +970,12 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
 
       const continueMatch = path.match(/^\/recent-work\/([^/]+)\/continue$/);
       if (method === "POST" && continueMatch) {
-        const body = await readBody<{ instruction?: string }>();
-        const task = services.recentWork.continueRecentWork(continueMatch[1], body.instruction);
+        const body = await readBody<{ instruction?: string; attachments?: ImageAttachmentInput[] }>();
+        const attachments = storeImageAttachments(`recent-work/${continueMatch[1]}/${Date.now()}`, body.attachments);
+        const task = services.recentWork.continueRecentWork(
+          continueMatch[1],
+          appendAttachmentContext(body.instruction ?? "", attachments) || undefined,
+        );
         void services.scheduler.tick();
         send(201, task);
         return;

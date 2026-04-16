@@ -34,7 +34,7 @@ export type ResolveObservedApprovalInput = {
 };
 
 type ResolutionPayload = {
-  method: "codex_gui_bridge" | "codex_resume_continuation" | "in_place" | "managed_handoff" | "none";
+  method: "codex_gui_bridge" | "codex_resume_continuation" | "claude_resume_continuation" | "in_place" | "managed_handoff" | "none";
   status: "verified" | "queued" | "failed";
   fallback_used: boolean;
   fallback_reason?: string;
@@ -116,9 +116,11 @@ export class ObservedResolutionService {
   private readonly recentWork: RecentWorkService;
   private readonly scheduler: SchedulerService;
   private readonly codexAdapter?: AgentAdapter;
+  private readonly claudeAdapter?: AgentAdapter;
   private readonly codexBridge?: ObservedApprovalBridge;
   private readonly codexInPlaceBridgeAvailable: boolean;
   private readonly codexResumeContinuationAvailable: boolean;
+  private readonly claudeResumeContinuationAvailable: boolean;
   private readonly verificationTimeoutMs: number;
   private readonly verificationPollIntervalMs: number;
 
@@ -127,9 +129,11 @@ export class ObservedResolutionService {
     recentWork: RecentWorkService;
     scheduler: SchedulerService;
     codexAdapter?: AgentAdapter;
+    claudeAdapter?: AgentAdapter;
     codexBridge?: ObservedApprovalBridge;
     codexInPlaceBridgeAvailable?: boolean;
     codexResumeContinuationAvailable?: boolean;
+    claudeResumeContinuationAvailable?: boolean;
     verificationTimeoutMs?: number;
     verificationPollIntervalMs?: number;
   }) {
@@ -137,9 +141,11 @@ export class ObservedResolutionService {
     this.recentWork = input.recentWork;
     this.scheduler = input.scheduler;
     this.codexAdapter = input.codexAdapter;
+    this.claudeAdapter = input.claudeAdapter;
     this.codexBridge = input.codexBridge;
     this.codexInPlaceBridgeAvailable = input.codexInPlaceBridgeAvailable ?? false;
     this.codexResumeContinuationAvailable = input.codexResumeContinuationAvailable ?? Boolean(input.codexAdapter?.appendToConversation);
+    this.claudeResumeContinuationAvailable = input.claudeResumeContinuationAvailable ?? Boolean(input.claudeAdapter?.appendToConversation);
     this.verificationTimeoutMs = Math.max(50, input.verificationTimeoutMs ?? 8000);
     this.verificationPollIntervalMs = Math.max(10, input.verificationPollIntervalMs ?? 400);
   }
@@ -162,9 +168,8 @@ export class ObservedResolutionService {
     const inPlaceSupported = runtime === "codex"
       && this.codexInPlaceBridgeAvailable
       && Boolean(this.codexAdapter?.appendToConversation);
-    const resumeContinuationSupported = runtime === "codex"
-      && this.codexResumeContinuationAvailable
-      && Boolean(this.codexAdapter?.appendToConversation);
+    const resumeAdapter = this.pickResumeContinuationAdapter(runtime);
+    const resumeContinuationSupported = Boolean(resumeAdapter);
     const inPlaceUnsupportedReason = bridgeSupported
       ? "legacy_in_place_relay_disabled"
       : `in_place_not_supported_for_runtime:${runtime}`;
@@ -249,9 +254,9 @@ export class ObservedResolutionService {
     }
 
     if (strategy === "auto" && resumeContinuationSupported && !inPlaceSupported) {
-      const prompt = this.buildCodexResumeContinuationPrompt(approval, input.decision, input.note);
+      const prompt = this.buildResumeContinuationPrompt(runtime, approval, input.decision, input.note);
       try {
-        const appendResult = await this.codexAdapter!.appendToConversation!(
+        const appendResult = await resumeAdapter!.appendToConversation!(
           recentWorkId,
           prompt,
           {
@@ -261,7 +266,10 @@ export class ObservedResolutionService {
         );
         const nextApproval = this.parseNextContinuationApproval(appendResult?.lastMessage);
         if (nextApproval) {
-          this.recentWork.setContinuationApproval(recentWorkId, nextApproval);
+          this.recentWork.setContinuationApproval(recentWorkId, {
+            ...nextApproval,
+            source: this.resumeContinuationSource(runtime),
+          });
         } else {
           this.recentWork.markResumeContinuationResolved(recentWorkId);
         }
@@ -270,12 +278,12 @@ export class ObservedResolutionService {
           ok: true,
           approval_id: input.approvalId,
           resolution: {
-            method: "codex_resume_continuation",
+            method: this.resumeContinuationMethod(runtime),
             status: "verified",
             fallback_used: attemptedLiveBridge || !bridgeSupported,
             fallback_reason: attemptedLiveBridge
-              ? "live_bridge_unverified_used_codex_resume_continuation"
-              : "live_bridge_unavailable_used_codex_resume_continuation",
+              ? `live_bridge_unverified_used_${this.resumeContinuationSource(runtime)}`
+              : `live_bridge_unavailable_used_${this.resumeContinuationSource(runtime)}`,
             strategy_requested: strategy,
             runtime,
             recent_work_id: recentWorkId,
@@ -290,7 +298,7 @@ export class ObservedResolutionService {
               method: "none",
               status: "failed",
               fallback_used: false,
-              fallback_reason: `codex_resume_continuation_failed:${error instanceof Error ? error.message : "unknown_error"}`,
+              fallback_reason: `${this.resumeContinuationSource(runtime)}_failed:${error instanceof Error ? error.message : "unknown_error"}`,
               strategy_requested: strategy,
               runtime,
               recent_work_id: recentWorkId,
@@ -487,7 +495,28 @@ export class ObservedResolutionService {
     ].filter((line): line is string => Boolean(line)).join("\n");
   }
 
-  private buildCodexResumeContinuationPrompt(
+  private pickResumeContinuationAdapter(runtime: AgentType): AgentAdapter | undefined {
+    if (runtime === "codex" && this.codexResumeContinuationAvailable && this.codexAdapter?.appendToConversation) {
+      return this.codexAdapter;
+    }
+
+    if (runtime === "claude-code" && this.claudeResumeContinuationAvailable && this.claudeAdapter?.appendToConversation) {
+      return this.claudeAdapter;
+    }
+
+    return undefined;
+  }
+
+  private resumeContinuationSource(runtime: AgentType): "codex_resume_continuation" | "claude_resume_continuation" {
+    return runtime === "claude-code" ? "claude_resume_continuation" : "codex_resume_continuation";
+  }
+
+  private resumeContinuationMethod(runtime: AgentType): ResolutionPayload["method"] {
+    return this.resumeContinuationSource(runtime);
+  }
+
+  private buildResumeContinuationPrompt(
+    runtime: AgentType,
     approval: ObservedApprovalDetail | undefined,
     decision: "approved" | "rejected",
     note?: string,
@@ -495,14 +524,15 @@ export class ObservedResolutionService {
     const action = pickString(approval?.action) ?? "Pending observed review";
     const context = pickString(approval?.context) ?? "No additional context was captured.";
     const operatorNote = pickString(note);
+    const runtimeLabel = runtime === "claude-code" ? "Claude Code" : "Codex";
 
     return [
-      "Buddy operator review decision for this Codex thread.",
+      `Buddy operator review decision for this ${runtimeLabel} thread.`,
       "",
       "Important: this is a same-thread continuation, not a live click on the desktop approval prompt.",
       "The original desktop approval prompt may remain open. When the operator returns to the computer, they should cancel that prompt instead of approving it.",
       "Do not retry or re-request the original desktop approval after this headless continuation. If the operation is already completed or rejected here, leave the old desktop approval for the operator to cancel.",
-      "This headless continuation may have approval_policy=never only for this run. Do not assume future turns sent from Codex Desktop have the same policy; the Desktop app may use its normal interactive approval settings again.",
+      "This headless continuation may use a different permission mode only for this run. Do not assume future turns sent from the desktop app have the same policy; the desktop app may use its normal interactive approval settings again.",
       "You may perform the approved blocked action and safe read-only verification. If another permission-sensitive action is required, do not run it. Stop and end your response with this exact block:",
       "NEXT_APPROVAL_REQUIRED",
       "Action: <short approval title>",
@@ -515,7 +545,7 @@ export class ObservedResolutionService {
       operatorNote ? `Operator note: ${operatorNote}` : undefined,
       "",
       decision === "approved"
-        ? "Continue the work in this same Codex thread. If the blocked command is still the correct and safe next step, run the equivalent operation now and report the actual outcome. Avoid duplicating side effects if the operation already appears completed."
+        ? `Continue the work in this same ${runtimeLabel} thread. If the blocked command is still the correct and safe next step, run the equivalent operation now and report the actual outcome. Avoid duplicating side effects if the operation already appears completed.`
         : "Treat the blocked action as rejected. Do not run it. Continue only with a safe alternative plan or a concise explanation of what remains blocked.",
       "Return a short status update only.",
     ].filter((line): line is string => Boolean(line)).join("\n");

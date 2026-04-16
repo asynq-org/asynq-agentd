@@ -8,14 +8,14 @@ import {
   parseObservedApprovalId,
 } from "./observed-resolution-service.ts";
 
-function createObservedRecentWork(id: string, pendingReview = false): RecentWorkRecord {
+function createObservedRecentWork(id: string, pendingReview = false, sourceType: RecentWorkRecord["source_type"] = "codex-session-file"): RecentWorkRecord {
   return {
     id,
     source_path: "/tmp/session.jsonl",
     project_path: "/tmp/project",
     title: "Observed session",
     summary: "Pending approval in observed session",
-    source_type: "codex-session-file",
+    source_type: sourceType,
     status: "active",
     updated_at: new Date().toISOString(),
     metadata: pendingReview
@@ -297,12 +297,64 @@ test("observed resolution auto strategy uses Codex resume continuation when no l
   assert.match(relayPrompt, /same-thread continuation/i);
   assert.match(relayPrompt, /cancel that prompt instead of approving it/i);
   assert.match(relayPrompt, /Do not retry or re-request the original desktop approval/i);
-  assert.match(relayPrompt, /approval_policy=never only for this run/i);
+  assert.match(relayPrompt, /different permission mode only for this run/i);
   assert.match(relayPrompt, /normal interactive approval settings/i);
 });
 
+test("observed resolution auto strategy uses Claude Code resume continuation when available", async () => {
+  let relayCalls = 0;
+  let relayPrompt = "";
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => ({
+        approval_id: "observed-review:recent_claude_observed_default",
+      }),
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("recent_claude_observed_default", true, "claude-session"),
+      scan: () => {},
+      continueRecentWork: () => {
+        throw new Error("continueRecentWork should not be called for Claude resume continuation");
+      },
+      markResumeContinuationResolved: () => undefined,
+      setContinuationApproval: () => {
+        throw new Error("setContinuationApproval should not be called without NEXT_APPROVAL_REQUIRED");
+      },
+    } as never,
+    scheduler: {
+      tick: async () => {},
+    } as never,
+    claudeAdapter: {
+      name: "claude-cli",
+      runTask: async () => {},
+      appendToConversation: async (_conversationId: string, prompt: string) => {
+        relayCalls += 1;
+        relayPrompt = prompt;
+      },
+    },
+    verificationTimeoutMs: 60,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:recent_claude_observed_default",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "claude_resume_continuation");
+  assert.equal(result.resolution.fallback_used, true);
+  assert.equal(result.resolution.fallback_reason, "live_bridge_unavailable_used_claude_resume_continuation");
+  assert.equal(relayCalls, 1);
+  assert.match(relayPrompt, /Claude Code thread/i);
+  assert.match(relayPrompt, /same-thread continuation/i);
+});
+
 test("observed resolution stores next continuation approval from Codex resume output", async () => {
-  let capturedApproval: { action: string; context: string; cmd?: string } | undefined;
+  let capturedApproval: { action: string; context: string; cmd?: string; source?: string } | undefined;
 
   const service = new ObservedResolutionService({
     dashboard: {
@@ -319,7 +371,7 @@ test("observed resolution stores next continuation approval from Codex resume ou
       markResumeContinuationResolved: () => {
         throw new Error("markResumeContinuationResolved should not be called when next approval is required");
       },
-      setContinuationApproval: (_id: string, approval: { action: string; context: string; cmd?: string }) => {
+      setContinuationApproval: (_id: string, approval: { action: string; context: string; cmd?: string; source?: string }) => {
         capturedApproval = approval;
       },
     } as never,
@@ -356,10 +408,12 @@ test("observed resolution stores next continuation approval from Codex resume ou
     action: capturedApproval.action,
     context: capturedApproval.context,
     cmd: capturedApproval.cmd,
+    source: capturedApproval.source,
   }, {
     action: "Approve command: touch /tmp/second-file",
     context: "Need to create the second file requested by the test.",
     cmd: "touch /tmp/second-file",
+    source: "codex_resume_continuation",
   });
 });
 

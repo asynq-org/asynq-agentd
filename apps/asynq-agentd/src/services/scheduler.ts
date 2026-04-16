@@ -372,6 +372,7 @@ export class SchedulerService {
           assigned_session_id: undefined,
           last_run_at: nowIso(),
           next_run_at: getNextRunAt(task.schedule),
+          context: this.withRecurringRunHistory(task, session.id, "completed"),
         });
       } else {
         this.tasks.update(task.id, {
@@ -388,15 +389,86 @@ export class SchedulerService {
         recoverable: false,
       });
       this.sessions.transition(session.id, "errored");
-      this.tasks.update(task.id, {
-        status: "failed",
-        assigned_session_id: session.id,
-      });
+      if (task.schedule) {
+        this.tasks.update(task.id, {
+          status: "queued",
+          assigned_session_id: undefined,
+          last_run_at: nowIso(),
+          next_run_at: getNextRunAt(task.schedule),
+          context: this.withRecurringRunHistory(task, session.id, "failed"),
+        });
+      } else {
+        this.tasks.update(task.id, {
+          status: "failed",
+          assigned_session_id: session.id,
+        });
+      }
       await this.relayManagedHandoff(task.id, session.id, "failed");
     } finally {
       this.sessions.unregisterControl(session.id);
       this.runningSessions.delete(task.id);
     }
+  }
+
+  private withRecurringRunHistory(
+    task: TaskRecord,
+    sessionId: string,
+    status: "completed" | "failed",
+  ): TaskRecord["context"] {
+    const previousHistory = Array.isArray(task.context?.recurring_history)
+      ? task.context.recurring_history
+      : [];
+    const nextEntry = {
+      run_at: nowIso(),
+      status,
+      session_id: sessionId,
+      summary: this.summarizeRecurringRun(sessionId, status),
+    };
+
+    return {
+      ...(task.context ?? {}),
+      recurring_history: [...previousHistory, nextEntry].slice(-12),
+    };
+  }
+
+  private summarizeRecurringRun(sessionId: string, status: "completed" | "failed"): string {
+    const events = this.storage.listActivity({ session_id: sessionId, limit: 40 });
+    const useful = events
+      .map((event) => this.describeRecurringActivity(event.payload))
+      .filter((value): value is string => Boolean(value));
+    const summary = useful.slice(0, 5).join(" ");
+    return this.compactText(summary || (status === "completed" ? "Completed without a detailed summary." : "Failed before producing a detailed summary."), 360);
+  }
+
+  private describeRecurringActivity(payload: ActivityRecord["payload"]): string | undefined {
+    switch (payload.type) {
+      case "agent_thinking":
+        return this.compactText(payload.summary, 180);
+      case "file_create":
+        return `Created ${payload.path}.`;
+      case "file_edit":
+        return `Edited ${payload.path}.`;
+      case "file_delete":
+        return `Deleted ${payload.path}.`;
+      case "file_batch":
+      case "file_batch_intent":
+        return this.compactText(payload.summary, 180);
+      case "command_run":
+        return `Ran ${payload.cmd} with exit ${payload.exit_code}.`;
+      case "error":
+        return `Error: ${this.compactText(payload.message, 160)}`;
+      default:
+        return undefined;
+    }
+  }
+
+  private compactText(value: string, maxLength: number): string {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
   }
 
   private async relayManagedHandoff(

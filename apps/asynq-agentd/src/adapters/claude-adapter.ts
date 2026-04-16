@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { AgentAdapter, AdapterHooks } from "./agent-adapter.ts";
+import type { AgentAdapter, AdapterHooks, AppendConversationResult } from "./agent-adapter.ts";
 import type { ActivityPayload, SessionRecord, TaskRecord } from "../domain.ts";
 import { parseJsonSafe } from "../utils/json.ts";
 import { createTerminalSpawnPlan } from "../utils/terminal-spawn.ts";
@@ -150,6 +150,86 @@ export class ClaudeCliAdapter implements AgentAdapter {
     child.kill("SIGTERM");
   }
 
+  async appendToConversation(
+    conversationId: string,
+    prompt: string,
+    options?: {
+      projectPath?: string;
+      modelPreference?: string;
+    },
+  ): Promise<AppendConversationResult> {
+    const args = [
+      ...this.binArgs,
+      ...this.buildClaudeAppendArgs(conversationId, prompt, options?.projectPath, options?.modelPreference),
+    ];
+    const spawnPlan = createTerminalSpawnPlan(this.binPath, args);
+
+    return await new Promise<AppendConversationResult>((resolve, reject) => {
+      const child = spawn(spawnPlan.command, spawnPlan.args, {
+        cwd: options?.projectPath ?? process.cwd(),
+        env: {
+          ...process.env,
+          ...this.env,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+
+      const stderrChunks: string[] = [];
+      let stdoutBuffer = "";
+      let lastMessage: string | undefined;
+
+      const flushStdout = (chunk: string, final = false) => {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split("\n");
+        if (!final) {
+          stdoutBuffer = lines.pop() ?? "";
+        } else {
+          stdoutBuffer = "";
+        }
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+
+          const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
+          if (entry?.type === "assistant" && typeof entry.message === "object" && entry.message) {
+            const text = this.extractAssistantText(entry.message as Record<string, unknown>);
+            if (text) {
+              lastMessage = text;
+            }
+          }
+
+          if (entry?.type === "result") {
+            lastMessage = this.pickString(entry.result) ?? lastMessage;
+          }
+        }
+      };
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        flushStdout(chunk, false);
+      });
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        stderrChunks.push(chunk);
+      });
+
+      child.on("error", reject);
+      child.on("close", (code) => {
+        flushStdout("", true);
+        if (code === 0) {
+          resolve({ lastMessage });
+          return;
+        }
+
+        reject(new Error(stderrChunks.join("").trim() || `Claude relay exited with code ${code ?? "unknown"}`));
+      });
+    });
+  }
+
   canResumeTask(task: TaskRecord, session: SessionRecord): boolean {
     return Boolean(this.pickResumeSessionId(task, session));
   }
@@ -198,6 +278,27 @@ export class ClaudeCliAdapter implements AgentAdapter {
     ];
   }
 
+  private buildClaudeAppendArgs(
+    conversationId: string,
+    prompt: string,
+    projectPath?: string,
+    model?: string,
+  ): string[] {
+    return [
+      "-p",
+      "--verbose",
+      "--output-format",
+      "stream-json",
+      "--permission-mode",
+      "acceptEdits",
+      ...(model?.trim() ? ["--model", model.trim()] : []),
+      ...(projectPath?.trim() ? ["--add-dir", projectPath.trim()] : []),
+      "--resume",
+      conversationId,
+      prompt,
+    ];
+  }
+
   private buildPrompt(task: TaskRecord, session: SessionRecord): string {
     const lines = [
       `Task: ${task.title}`,
@@ -210,6 +311,14 @@ export class ClaudeCliAdapter implements AgentAdapter {
 
     if (task.context?.test_command) {
       lines.push(`Validation command: ${task.context.test_command}`);
+    }
+
+    if (task.context?.recurring_history?.length) {
+      lines.push([
+        "Recurring task history (compact, newest last):",
+        ...task.context.recurring_history.map((item) => `- ${item.run_at} ${item.status}: ${item.summary}`),
+        "Use this history to avoid duplicate work and to continue the recurring task coherently.",
+      ].join("\n"));
     }
 
     const queuedMessages = Array.isArray(session.metadata?.queued_operator_messages)

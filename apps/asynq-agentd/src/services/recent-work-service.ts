@@ -128,7 +128,7 @@ export class RecentWorkService {
 
   setContinuationApproval(
     id: string,
-    approval: { action: string; context: string; cmd?: string; detected_at?: string },
+    approval: { action: string; context: string; cmd?: string; detected_at?: string; source?: string },
   ): RecentWorkRecord {
     const record = this.get(id);
     if (!record) {
@@ -143,7 +143,7 @@ export class RecentWorkService {
         pending_continuation_review: {
           ...approval,
           detected_at: approval.detected_at ?? nowIso(),
-          source: "codex_resume_continuation",
+          source: approval.source ?? "codex_resume_continuation",
         },
       },
     };

@@ -54,6 +54,18 @@ class InterceptedApprovalAdapter implements AgentAdapter {
   }
 }
 
+class FailingAdapter implements AgentAdapter {
+  readonly name = "failing";
+
+  async runTask(_task: TaskRecord, _session: SessionRecord, hooks: AdapterHooks): Promise<void> {
+    hooks.onEvent({
+      type: "agent_thinking",
+      summary: "Started recurring work before failing",
+    });
+    throw new Error("Synthetic recurring failure");
+  }
+}
+
 class RelayRecordingCodexAdapter extends MockAgentAdapter {
   relays: Array<{
     conversationId: string;
@@ -290,6 +302,55 @@ test("scheduler reschedules recurring tasks after a successful run", async () =>
   assert.ok(rescheduled?.last_run_at);
   assert.ok(rescheduled?.next_run_at);
   assert.ok(new Date(rescheduled.next_run_at ?? 0).getTime() > Date.now());
+  assert.equal(rescheduled?.context?.recurring_history?.length, 1);
+  assert.equal(rescheduled?.context?.recurring_history?.[0]?.status, "completed");
+  assert.match(rescheduled?.context?.recurring_history?.[0]?.summary ?? "", /Preparing task/);
+  assert.match(rescheduled?.context?.recurring_history?.[0]?.summary ?? "", /README\.md/);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("scheduler records failure history and keeps recurring tasks scheduled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-scheduler-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const config = new ConfigService(storage);
+  const scheduler = new SchedulerService(
+    storage,
+    tasks,
+    sessions,
+    config,
+    new Map([
+      ["custom", new FailingAdapter()],
+      ["claude-code", new MockAgentAdapter()],
+      ["codex", new MockAgentAdapter()],
+      ["opencode", new MockAgentAdapter()],
+    ]),
+  );
+
+  const task = tasks.create({
+    title: "Weekly blog draft",
+    description: "Create a blog draft.",
+    project_path: "/tmp/project",
+    schedule: "0 8 * * 3",
+  });
+
+  tasks.update(task.id, {
+    next_run_at: new Date(Date.now() - 60_000).toISOString(),
+  });
+
+  await scheduler.tick();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  const rescheduled = tasks.get(task.id);
+  assert.equal(rescheduled?.status, "queued");
+  assert.equal(rescheduled?.assigned_session_id, undefined);
+  assert.ok(rescheduled?.next_run_at);
+  assert.equal(rescheduled?.context?.recurring_history?.length, 1);
+  assert.equal(rescheduled?.context?.recurring_history?.[0]?.status, "failed");
+  assert.match(rescheduled?.context?.recurring_history?.[0]?.summary ?? "", /Synthetic recurring failure/);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

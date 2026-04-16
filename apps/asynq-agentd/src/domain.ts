@@ -31,6 +31,12 @@ export interface TaskContext {
   source_recent_work_updated_at?: string;
   source_codex_session_id?: string;
   observed_takeover?: ObservedTakeoverContext;
+  recurring_history?: Array<{
+    run_at: string;
+    status: "completed" | "failed";
+    session_id: string;
+    summary: string;
+  }>;
   files_to_focus?: string[];
   test_command?: string;
 }

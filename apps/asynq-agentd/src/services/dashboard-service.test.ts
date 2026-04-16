@@ -663,9 +663,64 @@ test("dashboard service exposes Codex resume continuation actions when bridge is
   const attention = dashboard.getAttentionRequired();
   assert.equal(attention.items[0]?.approval_id, "observed-review:recent_observed_resume_review");
   assert.equal(attention.items[0]?.can_resolve, true);
-  assert.deepEqual(attention.items[0]?.review?.suggested_actions, ["Continue in Codex", "Reject in Codex"]);
+  assert.deepEqual(attention.items[0]?.review?.suggested_actions, ["Resume", "Reject"]);
   assert.match(attention.items[0]?.review?.test_status ?? "", /desktop prompt may remain open/i);
   assert.match(attention.items[0]?.review?.test_status ?? "", /cancel the retry too/i);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("dashboard service exposes Claude Code resume continuation actions when available", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+    claudeResumeContinuationAvailable: true,
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_claude_resume_review",
+    source_path: "/tmp/claude-observed.jsonl",
+    project_path: "/tmp/demo",
+    title: "Claude approval thread",
+    summary: "Waiting on a Claude Code approval.",
+    source_type: "claude-session",
+    status: "active",
+    updated_at: new Date().toISOString(),
+    metadata: {
+      pending_observed_review: {
+        action: "Approve command: node write-blog.js",
+        context: "Claude wants to write the generated blog draft.",
+        cmd: "node write-blog.js",
+      },
+    },
+  });
+
+  const attention = dashboard.getAttentionRequired();
+  assert.equal(attention.items[0]?.approval_id, "observed-review:recent_claude_resume_review");
+  assert.equal(attention.items[0]?.can_resolve, true);
+  assert.deepEqual(attention.items[0]?.review?.suggested_actions, ["Resume", "Reject"]);
+  assert.match(attention.items[0]?.review?.test_status ?? "", /Claude Code thread/i);
+  assert.match(attention.items[0]?.review?.test_status ?? "", /desktop prompt may remain open/i);
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

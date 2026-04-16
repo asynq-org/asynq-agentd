@@ -54,6 +54,7 @@ const adapters = new Map([
   ["custom", new MockAgentAdapter()],
 ]);
 const codexAdapter = adapters.get("codex");
+const claudeAdapter = adapters.get("claude-code");
 const scheduler = new SchedulerService(storage, tasks, sessions, config, adapters, undefined, undefined, terminalStreams);
 const recentWork = new RecentWorkService(storage, tasks, {
   claudePath: runtimePaths.claudePath,
@@ -76,12 +77,14 @@ const dashboard = new DashboardService({
   updates,
   codexObservedBridgeAvailable: codexGuiBridge.isAvailable(),
   codexResumeContinuationAvailable: Boolean(codexAdapter?.appendToConversation),
+  claudeResumeContinuationAvailable: Boolean(claudeAdapter?.appendToConversation),
 });
 const observedResolution = new ObservedResolutionService({
   dashboard,
   recentWork,
   scheduler,
   codexAdapter,
+  claudeAdapter,
   codexBridge: codexGuiBridge,
 });
 const activeConfig = config.get();

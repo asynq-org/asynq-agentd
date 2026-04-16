@@ -182,6 +182,60 @@ writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.sl
   rmSync(root, { recursive: true, force: true });
 });
 
+test("claude adapter appends to an existing conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-claude-"));
+  const projectRoot = resolve(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const argvFile = resolve(root, "argv.json");
+  const scriptPath = resolve(root, "fake-claude-append.mjs");
+
+  writeFileSync(scriptPath, `
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.ASYNQ_AGENTD_ARGV_FILE, JSON.stringify(process.argv.slice(2), null, 2));
+console.log(JSON.stringify({
+  type: "assistant",
+  session_id: "bf42dbce-d5d7-40a2-97b7-fa60e12b9d76",
+  message: {
+    content: [
+      { type: "text", text: "HOTOVO: Claude continuation completed." }
+    ]
+  }
+}));
+`, "utf8");
+
+  const adapter = new ClaudeCliAdapter({
+    binPath: process.execPath,
+    binArgs: [scriptPath],
+    env: {
+      ASYNQ_AGENTD_ARGV_FILE: argvFile,
+    },
+  });
+
+  const result = await adapter.appendToConversation(
+    "bf42dbce-d5d7-40a2-97b7-fa60e12b9d76",
+    "Buddy review decision",
+    {
+      projectPath: projectRoot,
+      modelPreference: "claude-sonnet-4-6",
+    },
+  );
+
+  const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[];
+  assert.ok(argv.includes("-p"));
+  assert.ok(argv.includes("--output-format"));
+  assert.ok(argv.includes("stream-json"));
+  assert.ok(argv.includes("--resume"));
+  assert.ok(argv.includes("bf42dbce-d5d7-40a2-97b7-fa60e12b9d76"));
+  assert.ok(argv.includes("--add-dir"));
+  assert.ok(argv.includes(projectRoot));
+  assert.ok(argv.includes("--model"));
+  assert.ok(argv.includes("claude-sonnet-4-6"));
+  assert.equal(argv.at(-1), "Buddy review decision");
+  assert.equal(result.lastMessage, "HOTOVO: Claude continuation completed.");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("claude adapter accepts live terminal input", async () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-claude-"));
   const projectRoot = resolve(root, "project");
