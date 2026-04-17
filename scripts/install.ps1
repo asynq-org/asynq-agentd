@@ -6,7 +6,8 @@ param(
   [string]$PublicUrl = "",
   [string]$AccessMode = "",
   [string]$HostBind = "",
-  [string]$Port = "7433"
+  [string]$Port = "7433",
+  [switch]$SkipSpeechSetup
 )
 
 $ErrorActionPreference = "Stop"
@@ -492,6 +493,16 @@ if ($ServiceMode -eq "user") {
   $serviceStatus = "scheduled task '$taskName' created"
 }
 
+$speechSetupStatus = "skipped by installer flag"
+if (-not $SkipSpeechSetup) {
+  try {
+    & $agentctlCmd speech setup --install-model --restart | Out-Null
+    $speechSetupStatus = "whisper model configured"
+  } catch {
+    $speechSetupStatus = "speech setup skipped after a non-fatal error; run '$agentctlCmd speech setup --install-model --restart' later"
+  }
+}
+
 Write-Host ""
 Write-Host "asynq-agentd install complete"
 Write-Host "source dir: $SourceDir"
@@ -500,6 +511,7 @@ Write-Host "runtime home: $RuntimeHome"
 Write-Host "env file: $envFile"
 Write-Host "cmd env file: $envCmdFile"
 Write-Host "service: $serviceStatus"
+Write-Host "speech: $speechSetupStatus"
 Write-Host "access mode: $AccessMode"
 if ($AccessMode -eq "tailscale") {
   Write-Host "tailscale status: $tailscaleStatus"

@@ -14,6 +14,7 @@ TAILSCALE_ONBOARDING_DEFAULT="auto"
 REUSE_CONFIG=0
 SKIP_PAIRING=0
 SKIP_SERVICE_RELOAD=0
+SKIP_SPEECH_SETUP=0
 
 if ! command -v node >/dev/null 2>&1; then
   echo "error: node is required but was not found on PATH" >&2
@@ -40,6 +41,9 @@ while [ "$#" -gt 0 ]; do
     --skip-service-reload)
       SKIP_SERVICE_RELOAD=1
       ;;
+    --skip-speech-setup)
+      SKIP_SPEECH_SETUP=1
+      ;;
     --install-dir)
       shift
       [ "$#" -gt 0 ] || { echo "error: --install-dir requires a value" >&2; exit 1; }
@@ -52,7 +56,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       echo "error: unknown argument: $1" >&2
-      echo "usage: ./scripts/install.sh [--reuse-config] [--non-interactive] [--skip-pairing] [--skip-service-reload] [--install-dir <path>] [--runtime-home <path>]" >&2
+      echo "usage: ./scripts/install.sh [--reuse-config] [--non-interactive] [--skip-pairing] [--skip-service-reload] [--skip-speech-setup] [--install-dir <path>] [--runtime-home <path>]" >&2
       exit 1
       ;;
   esac
@@ -811,6 +815,17 @@ EOF
   fi
 fi
 
+SPEECH_SETUP_STATUS="not configured"
+if [ "$SKIP_SPEECH_SETUP" != "1" ]; then
+  if "$INSTALL_DIR/asynq-agentctl" speech setup --install-model --restart >/dev/null 2>&1; then
+    SPEECH_SETUP_STATUS="whisper model configured"
+  else
+    SPEECH_SETUP_STATUS="speech setup skipped after a non-fatal error; run '$INSTALL_DIR/asynq-agentctl speech setup --install-model --restart' later"
+  fi
+else
+  SPEECH_SETUP_STATUS="skipped by installer flag"
+fi
+
 AUTH_HINT="$RUNTIME_HOME/auth.json"
 
 echo
@@ -820,6 +835,7 @@ echo "install dir: $INSTALL_DIR"
 echo "runtime home: $RUNTIME_HOME"
 echo "env file: $ENV_FILE"
 echo "service: $SERVICE_STATUS"
+echo "speech: $SPEECH_SETUP_STATUS"
 echo "access mode: $ACCESS_MODE"
 if [ "$ACCESS_MODE" = "tailscale" ]; then
   echo "tailscale status: $TAILSCALE_STATUS"

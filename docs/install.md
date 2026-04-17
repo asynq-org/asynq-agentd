@@ -21,6 +21,7 @@ The script:
 - writes a reusable env file with bind host, port, and pairing URL defaults
 - asks for a public daemon URL so pairing QR codes can point at the right address
 - opens a browser pairing QR automatically once the daemon has created `auth.json`
+- best-effort configures local speech transcription by downloading a default Whisper model and wiring `asynq-agentctl speech setup`
 
 Hosted one-line setup can use a thin Pages wrapper like:
 
@@ -65,3 +66,4 @@ irm https://agentd.asynq.org/install.ps1 | iex
 - Buddy on iPhone requires an `https://...` daemon endpoint for reliable pairing and live updates. In Tailscale Admin Console, enable certs at `DNS → HTTPS Certificates → Enable HTTPS`, then let `asynq-agentctl pairing` auto-bootstrap TLS when possible.
 - Claude-backed tasks require a logged-in Claude Code CLI.
 - Codex-backed tasks require a working `codex` CLI.
+- Local voice dictation works best when `whisper-cli` and `ffmpeg` are installed. The installer now best-effort downloads the default Whisper model, and you can rerun setup later with `asynq-agentctl speech setup --install-model --restart`.

@@ -51,6 +51,8 @@ asynq-agentctl debug off
 asynq-agentctl tls status
 asynq-agentctl tls enable --cert /path/to/cert.pem --key /path/to/key.pem
 asynq-agentctl tls disable
+asynq-agentctl speech status
+asynq-agentctl speech setup --install-model --restart
 asynq-agentctl logs --lines 200
 asynq-agentctl logs --follow
 ```
@@ -60,6 +62,8 @@ When the daemon was installed as a user service, `start`, `stop`, and `restart` 
 `logs` reads the daemon log file from the runtime home. By default it shows the combined `asynq-agentd.log`; `--stdout` and `--stderr` can read the launchd-managed stream files instead.
 
 `tls` updates the daemon TLS settings stored in config. After `enable` or `disable`, restart the daemon so it can rebind with the new transport. When TLS is enabled, pair Buddy against an `https://...` public URL and the mobile client will automatically switch its live event transport from `ws://` to `wss://`.
+
+`speech` manages local voice-dictation prerequisites for Buddy. `speech status` shows whether `whisper-cli`, `ffmpeg`, and a local Whisper model are configured. `speech setup --install-model --restart` downloads the default Whisper model into `~/.asynq-agentd/models`, writes the corresponding env vars, and restarts the user service when available.
 
 ## Submit a task
 

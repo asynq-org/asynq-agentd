@@ -32,10 +32,21 @@ test("event stream service broadcasts globally and per session", () => {
       adapter: "codex-cli",
     },
   });
+  events.publish({
+    kind: "transcription",
+    session_id: "transcription:job_1",
+    created_at: "2026-03-16T12:00:02.000Z",
+    payload: {
+      entity_type: "transcription_job",
+      entity_id: "job_1",
+      status: "completed",
+      text: "hello",
+    },
+  });
 
   unsubscribeGlobal();
   unsubscribeScoped();
 
-  assert.deepEqual(globalSeen, ["activity:sess_1", "session:sess_2"]);
+  assert.deepEqual(globalSeen, ["activity:sess_1", "session:sess_2", "transcription:transcription:job_1"]);
   assert.deepEqual(scopedSeen, ["activity:sess_1"]);
 });

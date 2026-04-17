@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decodePathSegment, parseTerminalControlMessage, pickSourceCodexSessionId } from "./server.ts";
+import {
+  audioMimeTypeToExtension,
+  decodePathSegment,
+  parseTerminalControlMessage,
+  pickSourceCodexSessionId,
+  resolveAudioTranscriptionConfig,
+  sanitizeAudioName,
+} from "./server.ts";
 
 test("decodePathSegment decodes URL-encoded approval ids", () => {
   assert.equal(
@@ -102,5 +109,46 @@ test("pickSourceCodexSessionId preserves explicit task context when present", ()
       },
     ),
     "explicit-session-id",
+  );
+});
+
+test("audioMimeTypeToExtension maps common recording formats", () => {
+  assert.equal(audioMimeTypeToExtension("audio/mp4"), ".m4a");
+  assert.equal(audioMimeTypeToExtension("audio/wav"), ".wav");
+  assert.equal(audioMimeTypeToExtension("audio/mpeg"), ".mp3");
+});
+
+test("sanitizeAudioName normalizes unsafe characters", () => {
+  assert.equal(
+    sanitizeAudioName("Prompt note (CZ).m4a", 0, "audio/mp4"),
+    "01-Prompt-note-CZ-.m4a",
+  );
+  assert.equal(
+    sanitizeAudioName(undefined, 1, "audio/wav"),
+    "02-prompt-2.wav",
+  );
+});
+
+test("resolveAudioTranscriptionConfig prefers explicit model path", () => {
+  const config = resolveAudioTranscriptionConfig(
+    {
+      ASYNQ_AGENTD_WHISPER_MODEL: "/models/custom.bin",
+      ASYNQ_AGENTD_WHISPER_BIN: "/opt/bin/whisper-cli",
+      ASYNQ_AGENTD_FFMPEG_BIN: "/opt/bin/ffmpeg",
+      ASYNQ_AGENTD_WHISPER_LANGUAGE: "cs",
+    },
+    (path) => path === "/models/custom.bin",
+  );
+
+  assert.equal(config.modelPath, "/models/custom.bin");
+  assert.equal(config.whisperBin, "/opt/bin/whisper-cli");
+  assert.equal(config.ffmpegBin, "/opt/bin/ffmpeg");
+  assert.equal(config.language, "cs");
+});
+
+test("resolveAudioTranscriptionConfig rejects missing Whisper model", () => {
+  assert.throws(
+    () => resolveAudioTranscriptionConfig({}, () => false),
+    /ASYNQ_AGENTD_WHISPER_MODEL/,
   );
 });

@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer as createHttpListener, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createServer as createHttpsListener, type Server as HttpsServer } from "node:https";
 import type { Socket } from "node:net";
 import { extname, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { DaemonConfig } from "../domain.ts";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { SessionService } from "../services/session-service.ts";
@@ -69,6 +69,14 @@ interface ImageAttachmentInput {
   size?: number;
 }
 
+interface AudioTranscriptionInput {
+  name?: string;
+  mime_type?: string;
+  base64?: string;
+  size?: number;
+  duration_ms?: number;
+}
+
 interface StoredImageAttachment {
   name: string;
   mimeType: string;
@@ -77,6 +85,46 @@ interface StoredImageAttachment {
   height?: number;
   size?: number;
 }
+
+interface StoredAudioAttachment {
+  name: string;
+  mimeType: string;
+  path: string;
+  size?: number;
+  durationMs?: number;
+}
+
+interface AudioTranscriptionConfig {
+  whisperBin: string;
+  modelPath: string;
+  ffmpegBin: string;
+  language: string;
+}
+
+interface AudioTranscriptionJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  created_at: string;
+  updated_at: string;
+  mode: "sync" | "async";
+  duration_ms?: number;
+  text?: string;
+  error?: string;
+}
+
+class HttpError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(status: number, message: string, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+const FREE_SYNCHRONOUS_AUDIO_DURATION_MS = 60 * 1000;
+const MAX_AUDIO_DURATION_MS = 10 * 60 * 1000;
 
 function isPublicRoute(method: string, path: string): boolean {
   return method === "GET" && (path === "/" || path === "/health");
@@ -223,6 +271,36 @@ function mimeTypeToExtension(mimeType: string): string {
   return ".jpg";
 }
 
+export function audioMimeTypeToExtension(mimeType: string): string {
+  if (mimeType === "audio/wav" || mimeType === "audio/x-wav") {
+    return ".wav";
+  }
+  if (mimeType === "audio/mp3" || mimeType === "audio/mpeg") {
+    return ".mp3";
+  }
+  if (mimeType === "audio/ogg" || mimeType === "audio/opus") {
+    return ".ogg";
+  }
+  if (mimeType === "audio/flac") {
+    return ".flac";
+  }
+  if (mimeType === "audio/mp4" || mimeType === "audio/x-m4a") {
+    return ".m4a";
+  }
+  if (mimeType === "audio/x-caf") {
+    return ".caf";
+  }
+  return ".m4a";
+}
+
+export function sanitizeAudioName(value: string | undefined, index: number, mimeType: string): string {
+  const fallbackExt = audioMimeTypeToExtension(mimeType);
+  const trimmed = value?.trim() || `prompt-${index + 1}${fallbackExt}`;
+  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
+  const withExtension = extname(cleaned) ? cleaned : `${cleaned}${fallbackExt}`;
+  return `${String(index + 1).padStart(2, "0")}-${withExtension}`.slice(0, 120);
+}
+
 function storeImageAttachments(scope: string, attachments?: ImageAttachmentInput[]): StoredImageAttachment[] {
   if (!attachments?.length) {
     return [];
@@ -250,6 +328,188 @@ function storeImageAttachments(scope: string, attachments?: ImageAttachmentInput
       size: typeof attachment.size === "number" ? attachment.size : undefined,
     }];
   });
+}
+
+function storeAudioAttachment(scope: string, input?: AudioTranscriptionInput): StoredAudioAttachment {
+  const base64 = pickString(input?.base64)?.replace(/^data:[^;]+;base64,/, "");
+  if (!base64) {
+    throw new HttpError(400, "audio.base64 is required", "audio_missing");
+  }
+
+  const size = typeof input?.size === "number" && Number.isFinite(input.size) ? input.size : undefined;
+  if (size && size > 15 * 1024 * 1024) {
+    throw new HttpError(413, "Recorded audio is too large to transcribe right now.", "audio_too_large");
+  }
+  const durationMs = typeof input?.duration_ms === "number" && Number.isFinite(input.duration_ms)
+    ? Math.max(0, Math.floor(input.duration_ms))
+    : undefined;
+  if (durationMs && durationMs > MAX_AUDIO_DURATION_MS) {
+    throw new HttpError(413, "Recorded audio is too long. The current limit is 10 minutes.", "audio_too_long");
+  }
+
+  const mimeType = pickString(input?.mime_type) ?? "audio/mp4";
+  const root = resolve(homedir(), ".asynq-agentd", "attachments", scope);
+  mkdirSync(root, { recursive: true });
+  const name = sanitizeAudioName(pickString(input?.name), 0, mimeType);
+  const targetPath = resolve(root, name);
+  writeFileSync(targetPath, Buffer.from(base64, "base64"));
+  return {
+    name,
+    mimeType,
+    path: targetPath,
+    size,
+    durationMs,
+  };
+}
+
+function shouldKeepTranscriptionAudio(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ASYNQ_AGENTD_KEEP_TRANSCRIPTION_AUDIO === "1";
+}
+
+export function resolveAudioTranscriptionConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  pathExists: (path: string) => boolean = existsSync,
+): AudioTranscriptionConfig {
+  const whisperBin = pickString(env.ASYNQ_AGENTD_WHISPER_BIN) ?? "whisper-cli";
+  const ffmpegBin = pickString(env.ASYNQ_AGENTD_FFMPEG_BIN) ?? "/opt/homebrew/bin/ffmpeg";
+  const language = pickString(env.ASYNQ_AGENTD_WHISPER_LANGUAGE) ?? "auto";
+  const modelCandidates = [
+    pickString(env.ASYNQ_AGENTD_WHISPER_MODEL),
+    resolve(homedir(), ".asynq-agentd", "models", "ggml-base.bin"),
+    resolve(homedir(), ".cache", "whisper.cpp", "ggml-base.bin"),
+    "/opt/homebrew/share/whisper.cpp/models/ggml-base.bin",
+    "/usr/local/share/whisper.cpp/models/ggml-base.bin",
+  ].filter((value): value is string => Boolean(value));
+
+  const modelPath = modelCandidates.find((candidate) => pathExists(candidate));
+  if (!modelPath) {
+    throw new HttpError(
+      503,
+      "Audio transcription is not configured. Set ASYNQ_AGENTD_WHISPER_MODEL to a local Whisper ggml model path.",
+      "transcription_model_missing",
+    );
+  }
+
+  return {
+    whisperBin,
+    modelPath,
+    ffmpegBin,
+    language,
+  };
+}
+
+function runCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+
+    child.stdout.on("data", (chunk) => {
+      stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.on("error", (error) => {
+      rejectPromise(error);
+    });
+    child.on("close", (code) => {
+      const stdoutText = Buffer.concat(stdout).toString("utf8");
+      const stderrText = Buffer.concat(stderr).toString("utf8");
+      if (code === 0) {
+        resolvePromise({
+          stdout: stdoutText,
+          stderr: stderrText,
+        });
+        return;
+      }
+      rejectPromise(new Error(`${command} exited with code ${code}: ${stderrText.trim() || stdoutText.trim() || "unknown error"}`));
+    });
+  });
+}
+
+async function convertAudioForWhisper(inputPath: string, wavPath: string, ffmpegBin: string): Promise<void> {
+  if (extname(inputPath).toLowerCase() === ".wav") {
+    copyFileSync(inputPath, wavPath);
+    return;
+  }
+
+  try {
+    await runCommand(ffmpegBin, [
+      "-y",
+      "-i",
+      inputPath,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      wavPath,
+    ]);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new HttpError(
+        503,
+        "Audio transcription needs ffmpeg on the paired computer to convert this recording format.",
+        "transcription_ffmpeg_missing",
+      );
+    }
+    throw error;
+  }
+}
+
+async function transcribeAudioAttachment(scope: string, audio: StoredAudioAttachment): Promise<{ text: string }> {
+  const config = resolveAudioTranscriptionConfig();
+  const workDir = mkdtempSync(resolve(tmpdir(), "asynq-agentd-transcribe-"));
+  const wavPath = resolve(workDir, "input.wav");
+  const outputPrefix = resolve(workDir, "transcript");
+
+  try {
+    await convertAudioForWhisper(audio.path, wavPath, config.ffmpegBin);
+
+    try {
+      await runCommand(config.whisperBin, [
+        "-m",
+        config.modelPath,
+        "-f",
+        wavPath,
+        "-otxt",
+        "-of",
+        outputPrefix,
+        "-l",
+        config.language,
+        "-np",
+        "-nt",
+      ]);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new HttpError(
+          503,
+          "Audio transcription needs whisper-cli on the paired computer.",
+          "transcription_binary_missing",
+        );
+      }
+      throw error;
+    }
+
+    const transcriptPath = `${outputPrefix}.txt`;
+    if (!existsSync(transcriptPath)) {
+      throw new Error(`whisper-cli did not produce a transcript for ${scope}`);
+    }
+
+    const text = readFileSync(transcriptPath, "utf8").replace(/\s+/g, " ").trim();
+    if (!text) {
+      throw new HttpError(422, "No speech was detected in the recording.", "transcription_empty");
+    }
+
+    return { text };
+  } finally {
+    if (!shouldKeepTranscriptionAudio()) {
+      rmSync(audio.path, { force: true });
+    }
+    rmSync(workDir, { recursive: true, force: true });
+  }
 }
 
 function buildAttachmentContext(attachments: StoredImageAttachment[]): string | undefined {
@@ -521,6 +781,54 @@ type TlsServerOptions = {
 };
 
 export function createDaemonServer(services: AppServices, tls: TlsServerOptions): HttpServer | HttpsServer {
+  const transcriptionJobs = new Map<string, AudioTranscriptionJob>();
+
+  const publishTranscriptionJob = (job: AudioTranscriptionJob) => {
+    services.liveEvents.publish({
+      kind: "transcription",
+      session_id: `transcription:${job.id}`,
+      created_at: job.updated_at,
+      payload: {
+        entity_type: "transcription_job",
+        entity_id: job.id,
+        status: job.status,
+        text: job.text,
+        error: job.error,
+      },
+    });
+  };
+
+  const createTranscriptionJob = (audio: StoredAudioAttachment): AudioTranscriptionJob => {
+    const job: AudioTranscriptionJob = {
+      id: `tr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      status: "queued",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      mode: "async",
+      duration_ms: audio.durationMs,
+    };
+    transcriptionJobs.set(job.id, job);
+    publishTranscriptionJob(job);
+    void (async () => {
+      job.status = "running";
+      job.updated_at = new Date().toISOString();
+      publishTranscriptionJob(job);
+      try {
+        const result = await transcribeAudioAttachment(`audio-jobs/${job.id}`, audio);
+        job.status = "completed";
+        job.text = result.text;
+        job.updated_at = new Date().toISOString();
+        publishTranscriptionJob(job);
+      } catch (error) {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : "Unknown transcription error";
+        job.updated_at = new Date().toISOString();
+        publishTranscriptionJob(job);
+      }
+    })();
+    return job;
+  };
+
   const requestHandler = async (req: IncomingMessage, res: ServerResponse) => {
     if (!req.url || !req.method) {
       notFound(res);
@@ -815,6 +1123,34 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         return;
       }
 
+      if (method === "POST" && path === "/audio/transcriptions") {
+        const body = await readBody<{ audio?: AudioTranscriptionInput; async?: boolean }>();
+        const scope = `audio/${Date.now()}`;
+        const storedAudio = storeAudioAttachment(scope, body.audio);
+        const shouldRunAsync = body.async === true
+          || Boolean(storedAudio.durationMs && storedAudio.durationMs > FREE_SYNCHRONOUS_AUDIO_DURATION_MS);
+        if (shouldRunAsync) {
+          const job = createTranscriptionJob(storedAudio);
+          send(202, job);
+          return;
+        }
+
+        const transcription = await transcribeAudioAttachment(scope, storedAudio);
+        send(200, transcription);
+        return;
+      }
+
+      const transcriptionMatch = path.match(/^\/audio\/transcriptions\/([^/]+)$/);
+      if (method === "GET" && transcriptionMatch) {
+        const job = transcriptionJobs.get(decodePathSegment(transcriptionMatch[1]));
+        if (!job) {
+          sendNotFound();
+          return;
+        }
+        send(200, job);
+        return;
+      }
+
       if (method === "POST" && path === "/exports/markdown") {
         const body = await readBody<MarkdownExportInput>();
         const content = pickString(body.content);
@@ -983,6 +1319,13 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
 
       sendNotFound();
     } catch (error) {
+      if (error instanceof HttpError) {
+        send(error.status, {
+          error: error.message,
+          ...(error.code ? { code: error.code } : {}),
+        });
+        return;
+      }
       send(500, {
         error: error instanceof Error ? error.message : "Unknown server error",
       });

@@ -1,7 +1,7 @@
 import { accessSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, watchFile, writeFileSync, unwatchFile } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
-import { delimiter, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import QRCode from "qrcode";
 
@@ -17,6 +17,10 @@ const runtimeRoot = runtimeHome ? resolve(runtimeHome) : resolve(process.cwd(), 
 const combinedLogPath = resolve(runtimeRoot, "asynq-agentd.log");
 const stdoutLogPath = resolve(runtimeRoot, "asynq-agentd.stdout.log");
 const stderrLogPath = resolve(runtimeRoot, "asynq-agentd.stderr.log");
+const speechModelDir = resolve(runtimeRoot, "models");
+const defaultWhisperModel = "base";
+const defaultWhisperModelPath = resolve(speechModelDir, `ggml-${defaultWhisperModel}.bin`);
+const defaultWhisperModelUrl = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${defaultWhisperModel}.bin`;
 
 function resolveToken(): string | undefined {
   if (process.env.ASYNQ_AGENTD_TOKEN) {
@@ -186,16 +190,16 @@ function extractSelfDnsName(statusJson: string): string | undefined {
   }
 }
 
-function updatePublicUrlInEnv(nextPublicUrl: string): string | undefined {
+function updateEnvFileValue(key: string, value: string): string | undefined {
   const envPath = process.env.ASYNQ_AGENTD_ENV_FILE ?? resolve(runtimeRoot, "asynq-agentd.env");
-  const nextLine = `ASYNQ_AGENTD_PUBLIC_URL=${nextPublicUrl}`;
+  const nextLine = `${key}=${value}`;
 
   try {
     const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
     const lines = current
       .split("\n")
       .filter((line) => line.length > 0);
-    const index = lines.findIndex((line) => line.startsWith("ASYNQ_AGENTD_PUBLIC_URL="));
+    const index = lines.findIndex((line) => line.startsWith(`${key}=`));
     if (index >= 0) {
       lines[index] = nextLine;
     } else {
@@ -207,6 +211,10 @@ function updatePublicUrlInEnv(nextPublicUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function updatePublicUrlInEnv(nextPublicUrl: string): string | undefined {
+  return updateEnvFileValue("ASYNQ_AGENTD_PUBLIC_URL", nextPublicUrl);
 }
 
 function firstIpv4FromText(value: string): string | undefined {
@@ -1135,6 +1143,102 @@ function tryRestartServiceSilently(): boolean {
   }
 }
 
+async function downloadFile(url: string, targetPath: string): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Download failed with status ${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  mkdirSync(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, buffer);
+}
+
+function resolveWhisperModelFromEnv(): string | undefined {
+  return process.env.ASYNQ_AGENTD_WHISPER_MODEL;
+}
+
+function resolveSpeechStatus() {
+  const whisperBin = findExecutable("whisper-cli", [
+    "/opt/homebrew/bin/whisper-cli",
+    "/usr/local/bin/whisper-cli",
+  ]);
+  const ffmpegBin = findExecutable("ffmpeg", [
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+  ]);
+  const modelPath = resolveWhisperModelFromEnv() ?? (existsSync(defaultWhisperModelPath) ? defaultWhisperModelPath : undefined);
+
+  return {
+    whisper_cli: whisperBin ?? null,
+    ffmpeg: ffmpegBin ?? null,
+    model_path: modelPath ?? null,
+    model_present: Boolean(modelPath && existsSync(modelPath)),
+    env_file: process.env.ASYNQ_AGENTD_ENV_FILE ?? resolve(runtimeRoot, "asynq-agentd.env"),
+  };
+}
+
+async function configureSpeech(args: string[]): Promise<void> {
+  const action = args[0];
+  if (!action || !["status", "setup"].includes(action)) {
+    throw new Error("Usage: speech <status|setup> [--install-model] [--model <name>] [--model-url <url>] [--model-path <path>] [--force] [--restart]");
+  }
+
+  if (action === "status") {
+    print(resolveSpeechStatus());
+    return;
+  }
+
+  const installModel = args.includes("--install-model");
+  const force = args.includes("--force");
+  const restart = args.includes("--restart");
+  const requestedModel = getFlag(args, "--model") ?? defaultWhisperModel;
+  const modelUrl = getFlag(args, "--model-url") ?? `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${requestedModel}.bin`;
+  const modelPath = resolve(getFlag(args, "--model-path") ?? resolve(speechModelDir, `ggml-${requestedModel}.bin`));
+  const whisperBin = findExecutable("whisper-cli", [
+    "/opt/homebrew/bin/whisper-cli",
+    "/usr/local/bin/whisper-cli",
+  ]);
+  const ffmpegBin = findExecutable("ffmpeg", [
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+  ]);
+
+  if (installModel && (!existsSync(modelPath) || force)) {
+    mkdirSync(speechModelDir, { recursive: true });
+    await downloadFile(modelUrl, modelPath);
+  }
+
+  if (!existsSync(modelPath)) {
+    throw new Error(`Whisper model not found at ${modelPath}. Re-run with --install-model or pass --model-path.`);
+  }
+
+  const envFile = updateEnvFileValue("ASYNQ_AGENTD_WHISPER_MODEL", modelPath);
+  if (ffmpegBin) {
+    updateEnvFileValue("ASYNQ_AGENTD_FFMPEG_BIN", ffmpegBin);
+  }
+  if (whisperBin) {
+    updateEnvFileValue("ASYNQ_AGENTD_WHISPER_BIN", whisperBin);
+  }
+
+  const restarted = restart ? tryRestartServiceSilently() : false;
+  print({
+    ok: true,
+    env_file: envFile ?? null,
+    whisper_cli: whisperBin ?? null,
+    ffmpeg: ffmpegBin ?? null,
+    model_path: modelPath,
+    model_downloaded: installModel,
+    restart_requested: restart,
+    restarted,
+    notes: [
+      !whisperBin ? "whisper-cli not found on PATH; transcription will not work until it is installed." : undefined,
+      !ffmpegBin ? "ffmpeg not found on PATH; non-WAV recordings will fail until it is installed." : undefined,
+      restart && !restarted ? "Daemon restart was requested but no installed user service was found." : undefined,
+    ].filter(Boolean),
+  });
+}
+
 async function request(path: string, init?: RequestInit) {
   const token = resolveToken();
   const response = await fetch(`${baseUrl}${path}`, {
@@ -1183,6 +1287,9 @@ async function main(): Promise<void> {
       return;
     case "tls":
       await configureTls(args);
+      return;
+    case "speech":
+      await configureSpeech(args);
       return;
     case "logs":
       await printLogs(args);
@@ -1252,7 +1359,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing, debug, tls, logs, start, stop, restart");
+      console.error("Commands: status, agents, sessions, dashboard, tasks, approvals, approve, reject, recent-work, continue, submit, activity, config, token, pairing, debug, tls, speech, logs, start, stop, restart");
       process.exitCode = 1;
   }
 }
