@@ -1531,30 +1531,20 @@ export class DashboardService {
   }
 
   private pickLatestTerminalAgentOutput(sessionId: string): string | undefined {
-    const chunks = this.storage.listTerminalEvents(sessionId, 200);
-    for (let index = chunks.length - 1; index >= 0; index -= 1) {
-      const chunk = chunks[index];
-      if (!chunk || chunk.stream !== "stdout") {
+    const entries = this.collectParsedTerminalStdoutEntries(sessionId);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const parsed = entries[index];
+      if (!parsed) {
         continue;
       }
 
-      for (const line of chunk.chunk.split("\n").reverse()) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-
-        const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
-        if (!entry) {
-          continue;
-        }
-
-        const item = typeof entry.item === "object" && entry.item ? entry.item as Record<string, unknown> : undefined;
-        if (this.pickString(entry.type) === "item.completed" && this.pickString(item?.type) === "agent_message") {
-          const message = this.pickString(item?.text);
-          if (message) {
-            return message.trim();
-          }
+      const item = typeof parsed.entry.item === "object" && parsed.entry.item
+        ? parsed.entry.item as Record<string, unknown>
+        : undefined;
+      if (this.pickString(parsed.entry.type) === "item.completed" && this.pickString(item?.type) === "agent_message") {
+        const message = this.pickString(item?.text);
+        if (message) {
+          return message.trim();
         }
       }
     }
@@ -1563,44 +1553,29 @@ export class DashboardService {
   }
 
   private collectTerminalLiveProgress(sessionId: string) {
-    const chunks = this.storage.listTerminalEvents(sessionId, 200);
     const items: Array<{ id: string; summary: string; at: string }> = [];
 
-    for (const chunk of chunks) {
-      if (chunk.stream !== "stdout") {
-        continue;
-      }
+    for (const parsed of this.collectParsedTerminalStdoutEntries(sessionId)) {
+      const entryType = this.pickString(parsed.entry.type);
+      const item = typeof parsed.entry.item === "object" && parsed.entry.item
+        ? parsed.entry.item as Record<string, unknown>
+        : undefined;
+      const itemType = this.pickString(item?.type);
 
-      for (const line of chunk.chunk.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
+      if (entryType === "item.completed" && itemType === "agent_message") {
+        const message = this.pickString(item?.text);
+        if (message) {
+          items.push({ id: `${parsed.chunkId}:agent`, summary: message.trim(), at: parsed.createdAt });
         }
-
-        const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
-        if (!entry) {
-          continue;
+      } else if (entryType === "item.started" && itemType === "command_execution") {
+        const command = this.pickString(item?.command);
+        if (command) {
+          items.push({ id: `${parsed.chunkId}:cmd-start`, summary: `Running command: ${command.trim()}`, at: parsed.createdAt });
         }
-
-        const entryType = this.pickString(entry.type);
-        const item = typeof entry.item === "object" && entry.item ? entry.item as Record<string, unknown> : undefined;
-        const itemType = this.pickString(item?.type);
-
-        if (entryType === "item.completed" && itemType === "agent_message") {
-          const message = this.pickString(item?.text);
-          if (message) {
-            items.push({ id: `${chunk.id}:agent`, summary: message.trim(), at: chunk.created_at });
-          }
-        } else if (entryType === "item.started" && itemType === "command_execution") {
-          const command = this.pickString(item?.command);
-          if (command) {
-            items.push({ id: `${chunk.id}:cmd-start`, summary: `Running command: ${command.trim()}`, at: chunk.created_at });
-          }
-        } else if (entryType === "item.completed" && itemType === "command_execution") {
-          const command = this.pickString(item?.command);
-          if (command) {
-            items.push({ id: `${chunk.id}:cmd-done`, summary: `Command finished: ${command.trim()}`, at: chunk.created_at });
-          }
+      } else if (entryType === "item.completed" && itemType === "command_execution") {
+        const command = this.pickString(item?.command);
+        if (command) {
+          items.push({ id: `${parsed.chunkId}:cmd-done`, summary: `Command finished: ${command.trim()}`, at: parsed.createdAt });
         }
       }
     }
@@ -1608,6 +1583,60 @@ export class DashboardService {
     return items
       .sort((a, b) => b.at.localeCompare(a.at))
       .slice(0, 6);
+  }
+
+  private collectParsedTerminalStdoutEntries(sessionId: string): Array<{
+    entry: Record<string, unknown>;
+    chunkId: number;
+    createdAt: string;
+  }> {
+    const chunks = this.storage.listTerminalEvents(sessionId, 200);
+    const entries: Array<{
+      entry: Record<string, unknown>;
+      chunkId: number;
+      createdAt: string;
+    }> = [];
+    let stdoutBuffer = "";
+    let lastChunkId = 0;
+    let lastCreatedAt = "";
+
+    const flushBuffer = (final = false) => {
+      const lines = stdoutBuffer.split("\n");
+      stdoutBuffer = final ? "" : (lines.pop() ?? "");
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+
+        const entry = parseJsonSafe<Record<string, unknown> | undefined>(trimmed, undefined);
+        if (entry) {
+          entries.push({
+            entry,
+            chunkId: lastChunkId,
+            createdAt: lastCreatedAt,
+          });
+        }
+      }
+    };
+
+    for (const chunk of chunks) {
+      if (chunk.stream !== "stdout") {
+        continue;
+      }
+
+      stdoutBuffer += chunk.chunk;
+      lastChunkId = chunk.id;
+      lastCreatedAt = chunk.created_at;
+      flushBuffer(false);
+    }
+
+    if (stdoutBuffer.trim()) {
+      flushBuffer(true);
+    }
+
+    return entries;
   }
 
   private collectChangedFiles(record: RecentWorkRecord, rawAgentResponse?: string): string[] {

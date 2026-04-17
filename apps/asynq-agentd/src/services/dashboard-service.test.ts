@@ -494,6 +494,65 @@ test("dashboard service keeps managed parent sessions visible and links child se
   rmSync(root, { recursive: true, force: true });
 });
 
+test("dashboard service reconstructs split terminal JSON for managed session details", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+  });
+
+  const task = tasks.create({
+    title: "Managed split output",
+    description: "Reproduce split stdout JSON.",
+    project_path: "/tmp/demo",
+    agent_type: "codex",
+  });
+  const session = sessions.createFromTask(task, "codex-cli");
+  tasks.update(task.id, {
+    status: "running",
+    assigned_session_id: session.id,
+  });
+
+  storage.insertTerminalEvent(
+    session.id,
+    "2026-04-17T10:00:00.000Z",
+    "stdout",
+    "{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"command\":\"npm test\"}}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",",
+  );
+  storage.insertTerminalEvent(
+    session.id,
+    "2026-04-17T10:00:01.000Z",
+    "stdout",
+    "\"text\":\"Final answer with full context.\"}}\n",
+  );
+
+  const detail = dashboard.getManagedSessionDetail(session.id);
+  assert.equal(detail?.raw_agent_response, "Final answer with full context.");
+  assert.ok(detail?.live_progress.some((item) => item.summary === "Running command: npm test"));
+  assert.ok(detail?.live_progress.some((item) => item.summary === "Final answer with full context."));
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("dashboard service exposes observed Codex approval requests in attention required", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
   const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
