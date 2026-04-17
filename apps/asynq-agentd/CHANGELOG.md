@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.0
+
+### Minor Changes
+
+- Add Codex observed-review continuation support.
+
+  Codex observed approvals can now fall back to a same-thread `codex exec resume`
+  continuation when a live approval bridge is not available. Buddy labels this flow
+  as "Continue in Codex" / "Reject in Codex" instead of presenting it as a true
+  desktop approval, and the daemon warns that the original Codex Desktop prompt may
+  remain open and should be cancelled later.
+
+  The macOS GUI bridge remains available as an experimental path, but it is now
+  opt-in via `ASYNQ_AGENTD_CODEX_GUI_BRIDGE=1` so installations are not prompted for
+  Accessibility permissions unless explicitly enabled.
+
+  Headless Codex continuations can now request the next permission-sensitive step
+  using a structured `NEXT_APPROVAL_REQUIRED` response. The daemon stores that as a
+  follow-up Buddy approval for the same observed thread, allowing users to approve
+  multi-step Codex work one step at a time without guessing the required scope in
+  advance.
+
+- Add screenshot attachments for managed-session prompts and follow-up messages.
+
+  Buddy can now send image attachments when creating managed sessions, continuing managed sessions, or taking over observed work. The daemon stores the uploaded screenshots under the local agentd attachment directory and appends compact screenshot context to the prompt so the runtime can use the images without embedding large base64 payloads into the conversation itself.
+
+- Add Claude Code observed-review continuation support.
+
+  Claude Code observed approvals can now use the same headless same-thread continuation flow as Codex when Buddy cannot click the original desktop prompt directly. The daemon sends the operator decision through `claude -p --resume`, tracks the final Claude response, and stores follow-up `NEXT_APPROVAL_REQUIRED` requests so multi-step Claude work can be approved from Buddy one step at a time.
+
+  Recurring tasks now keep a compact per-task run history in task context. Each scheduled run records a short status summary, recent changed work, and whether it completed or failed; future runs receive this compact history in their prompt so recurring agents can avoid duplicating previous output.
+
 ## 0.6.0
 
 ### Minor Changes
