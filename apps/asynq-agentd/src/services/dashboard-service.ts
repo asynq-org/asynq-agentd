@@ -22,6 +22,8 @@ interface DashboardServiceOptions {
   claudeResumeContinuationAvailable?: boolean;
 }
 
+const OBSERVED_WORKING_FRESHNESS_MS = 2 * 60 * 1000;
+
 type ObservedPendingReview = {
   action: string;
   context: string;
@@ -349,6 +351,7 @@ export class DashboardService {
           title: summarized.title,
           source_type: record.source_type,
           status: record.status,
+          is_working: this.isObservedWorkCurrentlyWorking(record),
           project_path: record.project_path,
           summary: summarized.summary,
           next_action: summarized.nextMove ?? "continue_recent_work",
@@ -396,7 +399,7 @@ export class DashboardService {
       project: this.projectName(record.project_path ?? "Linked project"),
       source_type: record.source_type,
       status: record.status,
-      is_working: record.status === "active",
+      is_working: this.isObservedWorkCurrentlyWorking(record),
       summary: summarized.summary,
       raw_user_input: rawUserInput,
       raw_agent_response: rawAgentResponse,
@@ -420,6 +423,19 @@ export class DashboardService {
 
     this.lastRecentWorkRefreshAt = now;
     this.recentWork.scan();
+  }
+
+  private isObservedWorkCurrentlyWorking(record: RecentWorkRecord): boolean {
+    if (record.status !== "active") {
+      return false;
+    }
+
+    const updatedAtMs = Date.parse(record.updated_at);
+    if (Number.isNaN(updatedAtMs)) {
+      return false;
+    }
+
+    return Date.now() - updatedAtMs <= OBSERVED_WORKING_FRESHNESS_MS;
   }
 
   getManagedSessionDetail(id: string) {

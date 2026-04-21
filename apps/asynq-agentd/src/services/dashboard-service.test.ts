@@ -1386,3 +1386,50 @@ test("dashboard service exposes agentd and Buddy compatibility updates in attent
   storage.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("dashboard service marks stale active observed work as not currently working", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-dashboard-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const sessions = new SessionService(storage);
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: join(root, "missing-claude"),
+    codexPath: join(root, "missing-codex"),
+  });
+  const runtimes = new RuntimeDiscoveryService();
+  const summaries = new SummaryService({
+    storage,
+    runtimes,
+    getConfig: () => createDefaultConfig(),
+  });
+  const dashboard = new DashboardService({
+    storage,
+    tasks,
+    sessions,
+    recentWork,
+    summaries,
+    runtimes,
+    updates: createTestUpdates(),
+  });
+
+  storage.upsertRecentWork({
+    id: "recent_stale_active",
+    source_path: "/tmp/stale-active.jsonl",
+    project_path: "/tmp/demo",
+    title: "Stale active observed thread",
+    summary: "Work stopped abruptly after an OOM.",
+    source_type: "codex-session-file",
+    status: "active",
+    updated_at: "2026-03-28T01:00:00.000Z",
+  });
+
+  const continueWorking = dashboard.getContinueWorking();
+  const observed = continueWorking.items.find((item) => item.kind === "recent_work" && item.recent_work_id === "recent_stale_active");
+  assert.equal(observed?.is_working, false);
+
+  const detail = dashboard.getRecentWorkDetail("recent_stale_active");
+  assert.equal(detail?.is_working, false);
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
