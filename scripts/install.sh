@@ -156,6 +156,73 @@ run_tailscale_capture() {
   ' "$tailscale_bin" "$@" || return 1
 }
 
+tailscale_system_service_name() {
+  printf '%s' "homebrew.mxcl.tailscale"
+}
+
+tailscale_user_launchagent_path() {
+  printf '%s' "${HOME}/Library/LaunchAgents/$(tailscale_system_service_name).plist"
+}
+
+tailscale_system_launchdaemon_path() {
+  printf '%s' "/Library/LaunchDaemons/$(tailscale_system_service_name).plist"
+}
+
+remove_stale_tailscale_launchagent() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    return 0
+  fi
+
+  launchagent_path=$(tailscale_user_launchagent_path)
+  if [ ! -f "$launchagent_path" ]; then
+    return 0
+  fi
+
+  echo "Removing stale per-user Homebrew Tailscale LaunchAgent at $launchagent_path" >&2
+  launchctl bootout "gui/$(id -u)" "$launchagent_path" >/dev/null 2>&1 || true
+  rm -f "$launchagent_path"
+}
+
+tailscale_ping_host() {
+  tailscale_bin=$1
+  host=$2
+  run_tailscale_capture "$tailscale_bin" ping "$host" >/dev/null 2>&1
+}
+
+tailscale_dns_query_host() {
+  tailscale_bin=$1
+  host=$2
+  run_tailscale_capture "$tailscale_bin" dns query "$host" >/dev/null 2>&1
+}
+
+validate_tailscale_host() {
+  host=$1
+  tailscale_bin=$(resolve_tailscale_bin || true)
+
+  if [ -z "${host:-}" ] || [ -z "${tailscale_bin:-}" ]; then
+    return 1
+  fi
+
+  case "$host" in
+    *.ts.net)
+      if tailscale_ping_host "$tailscale_bin" "$host"; then
+        return 0
+      fi
+
+      if tailscale_dns_query_host "$tailscale_bin" "$host"; then
+        echo "warning: Tailscale knows the MagicDNS hostname '$host', but the local macOS resolver cannot use it yet." >&2
+        echo "warning: On macOS this usually means the split-DNS resolver state is incomplete after install, reboot, or service restart." >&2
+      else
+        echo "warning: Tailscale reported the MagicDNS hostname '$host', but it is not resolvable yet." >&2
+      fi
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 prompt() {
   label=$1
   default_value=$2
@@ -337,7 +404,8 @@ install_tailscale() {
     if command -v brew >/dev/null 2>&1; then
       echo "Installing Tailscale CLI and daemon with Homebrew..."
       brew install tailscale
-      brew services start tailscale >/dev/null 2>&1 || true
+      remove_stale_tailscale_launchagent || true
+      run_with_optional_sudo brew services start tailscale >/dev/null 2>&1 || true
       return
     fi
 
@@ -395,6 +463,14 @@ tailscale_service_running() {
   uname_s=$(uname -s)
 
   if [ "$uname_s" = "Darwin" ]; then
+    system_service=$(tailscale_system_service_name)
+    system_plist=$(tailscale_system_launchdaemon_path)
+
+    if [ ! -f "$system_plist" ]; then
+      return 1
+    fi
+
+    launchctl print "system/$system_service" >/dev/null 2>&1 || return 1
     [ -S /var/run/tailscaled.socket ] && return 0 || return 1
   fi
 
@@ -421,8 +497,8 @@ ensure_tailscale_daemon() {
       return 0
     fi
 
-    echo "Ensuring Tailscale daemon is running via Homebrew services..." >&2
-    brew services stop tailscale >/dev/null 2>&1 || true
+    echo "Ensuring Tailscale daemon is running via Homebrew system service..." >&2
+    remove_stale_tailscale_launchagent || true
     run_with_optional_sudo brew services stop tailscale >/dev/null 2>&1 || true
     run_with_optional_sudo brew services start tailscale >/dev/null 2>&1 || true
     sleep 2
@@ -436,8 +512,8 @@ ensure_tailscale_daemon() {
       return 0
     fi
 
-    brew services cleanup >/dev/null 2>&1 || true
     run_with_optional_sudo brew services cleanup >/dev/null 2>&1 || true
+    remove_stale_tailscale_launchagent || true
     run_with_optional_sudo brew services start tailscale >/dev/null 2>&1 || true
     sleep 2
     if tailscale_service_running; then
@@ -463,7 +539,8 @@ connect_tailscale() {
   uname_s=$(uname -s)
   tailscale_bin=$(resolve_tailscale_bin || true)
 
-  if [ -n "$(detect_tailscale_host || true)" ]; then
+  existing_host=$(detect_tailscale_host || true)
+  if [ -n "${existing_host:-}" ] && validate_tailscale_host "$existing_host"; then
     return 0
   fi
 
@@ -500,6 +577,11 @@ connect_tailscale() {
   fi
 
   if host=$(wait_for_tailscale_host 12); then
+    if ! validate_tailscale_host "$host"; then
+      echo "warning: Tailscale connected as $host, but local MagicDNS validation failed." >&2
+      echo "warning: Do not persist a .ts.net pairing URL until the hostname resolves locally." >&2
+      return 1
+    fi
     printf '%s\n' "Tailscale connected as $host"
     return 0
   fi
@@ -516,7 +598,8 @@ connect_tailscale() {
 ensure_tailscale_ready() {
   onboarding_mode=$1
 
-  if [ -n "$(detect_tailscale_host || true)" ]; then
+  existing_host=$(detect_tailscale_host || true)
+  if [ -n "${existing_host:-}" ] && validate_tailscale_host "$existing_host"; then
     return 0
   fi
 
@@ -672,6 +755,14 @@ if [ "$ACCESS_MODE" = "tailscale" ]; then
       ;;
   esac
 
+  if [ -n "${TAILSCALE_HOST:-}" ] && ! validate_tailscale_host "$TAILSCALE_HOST"; then
+    echo >&2
+    echo "warning: Tailscale reported '$TAILSCALE_HOST', but the hostname is not usable locally yet." >&2
+    echo "warning: The installer will not assume that MagicDNS is ready until local resolution succeeds." >&2
+    TAILSCALE_HOST=""
+    TAILSCALE_STATUS="installed"
+  fi
+
   if [ -n "${TAILSCALE_HOST:-}" ]; then
     PUBLIC_URL_DEFAULT="http://$TAILSCALE_HOST:$PORT"
   else
@@ -693,6 +784,7 @@ mkdir -p "$INSTALL_DIR" "$RUNTIME_HOME"
 ENV_FILE="$RUNTIME_HOME/asynq-agentd.env"
 cat >"$ENV_FILE" <<EOF
 ASYNQ_AGENTD_HOME=$RUNTIME_HOME
+ASYNQ_AGENTD_URL=$PUBLIC_URL
 ASYNQ_AGENTD_PUBLIC_URL=$PUBLIC_URL
 HOST=$HOST_BIND
 PORT=$PORT
@@ -710,6 +802,7 @@ set -eu
 ENV_FILE="\${ASYNQ_AGENTD_ENV_FILE:-$ENV_FILE}"
 [ -f "\$ENV_FILE" ] && . "\$ENV_FILE"
 export ASYNQ_AGENTD_HOME="\${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME}"
+export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$PUBLIC_URL}"
 export ASYNQ_AGENTD_PUBLIC_URL="\${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL}"
 export HOST="\${HOST:-$HOST_BIND}"
 export PORT="\${PORT:-$PORT}"
@@ -723,6 +816,7 @@ set -eu
 ENV_FILE="\${ASYNQ_AGENTD_ENV_FILE:-$ENV_FILE}"
 [ -f "\$ENV_FILE" ] && . "\$ENV_FILE"
 export ASYNQ_AGENTD_HOME="\${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME}"
+export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$PUBLIC_URL}"
 export ASYNQ_AGENTD_PUBLIC_URL="\${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL}"
 export HOST="\${HOST:-$HOST_BIND}"
 export PORT="\${PORT:-$PORT}"
@@ -752,6 +846,8 @@ if [ "$SERVICE_CHOICE" = "user" ]; then
     <dict>
       <key>ASYNQ_AGENTD_HOME</key>
       <string>$RUNTIME_HOME</string>
+      <key>ASYNQ_AGENTD_URL</key>
+      <string>$PUBLIC_URL</string>
       <key>ASYNQ_AGENTD_PUBLIC_URL</key>
       <string>$PUBLIC_URL</string>
       <key>HOST</key>
