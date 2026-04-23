@@ -226,13 +226,22 @@ validate_tailscale_host() {
 prompt() {
   label=$1
   default_value=$2
-  if [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+  if [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ]; then
     printf '%s' "$default_value"
     return
   fi
 
-  printf "%s [%s]: " "$label" "$default_value" >&2
-  read -r value || true
+  if [ -r /dev/tty ]; then
+    printf "%s [%s]: " "$label" "$default_value" >/dev/tty
+    read -r value </dev/tty || true
+  elif [ -t 0 ]; then
+    printf "%s [%s]: " "$label" "$default_value" >&2
+    read -r value || true
+  else
+    printf '%s' "$default_value"
+    return
+  fi
+
   if [ -z "${value:-}" ]; then
     printf '%s' "$default_value"
   else
@@ -259,7 +268,7 @@ prompt_choice() {
 confirm() {
   label=$1
   default_value=$2
-  if [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ] || [ ! -t 0 ]; then
+  if [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ]; then
     [ "$default_value" = "yes" ] && return 0 || return 1
   fi
 
@@ -269,8 +278,16 @@ confirm() {
     suffix="y/N"
   fi
 
-  printf "%s [%s]: " "$label" "$suffix" >&2
-  read -r value || true
+  if [ -r /dev/tty ]; then
+    printf "%s [%s]: " "$label" "$suffix" >/dev/tty
+    read -r value </dev/tty || true
+  elif [ -t 0 ]; then
+    printf "%s [%s]: " "$label" "$suffix" >&2
+    read -r value || true
+  else
+    [ "$default_value" = "yes" ] && return 0 || return 1
+  fi
+
   case "${value:-}" in
     y|Y|yes|YES) return 0 ;;
     n|N|no|NO) return 1 ;;
@@ -775,6 +792,12 @@ if [ "$ACCESS_MODE" = "tailscale" ]; then
     echo "  3. Then enter a URL like: http://your-mac.tailnet.ts.net:$PORT" >&2
     echo >&2
   fi
+fi
+
+if [ "$ACCESS_MODE" = "tailscale" ] && [ -z "${TAILSCALE_HOST:-}" ] && [ "${ASYNQ_AGENTD_NONINTERACTIVE:-0}" = "1" ]; then
+  echo "error: Tailscale onboarding did not produce a usable MagicDNS hostname in non-interactive mode." >&2
+  echo "error: Rerun the installer interactively, or finish 'tailscale up' first and then rerun with --reuse-config." >&2
+  exit 1
 fi
 
 PUBLIC_URL=$(prompt "Public daemon URL to embed in pairing QR" "$PUBLIC_URL_DEFAULT")
