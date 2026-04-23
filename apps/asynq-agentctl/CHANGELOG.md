@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3
+
+### Patch Changes
+
+- Fix hosted installer prompting for `curl | sh` onboarding.
+
+  The Unix installer now reads interactive prompts from `/dev/tty` when stdin is a pipe, so hosted installs can wait for the operator instead of silently accepting placeholder defaults. In non-interactive Tailscale mode, onboarding now fails fast if no usable MagicDNS hostname is available instead of continuing with `your-machine.tailnet.ts.net`.
+
 ## 0.8.2
 
 ### Patch Changes
