@@ -316,20 +316,53 @@ run_with_optional_sudo() {
   return 1
 }
 
+wait_status_begin() {
+  label=$1
+  timeout_seconds=$2
+  echo "$label (up to ${timeout_seconds}s)..." >&2
+}
+
+wait_status_tick() {
+  label=$1
+  elapsed=$2
+
+  if [ "$elapsed" -gt 0 ] && [ $((elapsed % 5)) -eq 0 ]; then
+    echo "  still waiting for $label (${elapsed}s elapsed)..." >&2
+  fi
+}
+
+wait_status_end() {
+  label=$1
+  outcome=$2
+  case "$outcome" in
+    ok)
+      echo "$label ready." >&2
+      ;;
+    timeout)
+      echo "$label did not become ready in time." >&2
+      ;;
+  esac
+}
+
 wait_for_auth() {
   auth_path=$1
   timeout_seconds=$2
   elapsed=0
 
+  wait_status_begin "Waiting for daemon auth token" "$timeout_seconds"
+
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
     if [ -f "$auth_path" ]; then
+      wait_status_end "Daemon auth token" "ok"
       return 0
     fi
 
     sleep 1
     elapsed=$((elapsed + 1))
+    wait_status_tick "daemon auth token" "$elapsed"
   done
 
+  wait_status_end "Daemon auth token" "timeout"
   return 1
 }
 
@@ -338,15 +371,20 @@ wait_for_daemon_api() {
   timeout_seconds=$2
   elapsed=0
 
+  wait_status_begin "Waiting for local daemon API" "$timeout_seconds"
+
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
     if "$ctl_bin" status 2>/dev/null | grep -q '"reachable": true'; then
+      wait_status_end "Local daemon API" "ok"
       return 0
     fi
 
     sleep 1
     elapsed=$((elapsed + 1))
+    wait_status_tick "local daemon API" "$elapsed"
   done
 
+  wait_status_end "Local daemon API" "timeout"
   return 1
 }
 
@@ -354,17 +392,22 @@ wait_for_tailscale_host() {
   timeout_seconds=$1
   elapsed=0
 
+  wait_status_begin "Waiting for Tailscale hostname" "$timeout_seconds"
+
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
     host=$(detect_tailscale_host || true)
     if [ -n "${host:-}" ]; then
+      wait_status_end "Tailscale hostname" "ok"
       printf '%s' "$host"
       return 0
     fi
 
     sleep 1
     elapsed=$((elapsed + 1))
+    wait_status_tick "Tailscale hostname" "$elapsed"
   done
 
+  wait_status_end "Tailscale hostname" "timeout"
   return 1
 }
 
@@ -846,6 +889,8 @@ echo "Installing pnpm dependencies in $REPO_ROOT"
   pnpm install
 )
 
+echo "Writing wrapper binaries and runtime configuration..."
+
 cat >"$INSTALL_DIR/asynq-agentd" <<EOF
 #!/bin/sh
 set -eu
@@ -923,6 +968,7 @@ EOF
     if [ "$SKIP_SERVICE_RELOAD" = "1" ]; then
       SERVICE_STATUS="launchd user agent updated at $PLIST_PATH (reload skipped)"
     else
+      echo "Reloading launchd user service..."
       launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
       launchctl load "$PLIST_PATH"
       SERVICE_STATUS="launchd user agent installed at $PLIST_PATH"
@@ -953,6 +999,7 @@ EOF
     if [ "$SKIP_SERVICE_RELOAD" = "1" ]; then
       SERVICE_STATUS="systemd user service updated at $UNIT_PATH (reload skipped)"
     else
+      echo "Reloading systemd user service..."
       systemctl --user daemon-reload
       systemctl --user enable --now asynq-agentd.service
       SERVICE_STATUS="systemd user service installed at $UNIT_PATH"
@@ -964,10 +1011,13 @@ fi
 
 SPEECH_SETUP_STATUS="not configured"
 if [ "$SKIP_SPEECH_SETUP" != "1" ]; then
+  echo "Configuring local speech support (this may take a few seconds)..."
   if "$INSTALL_DIR/asynq-agentctl" speech setup --install-model --restart >/dev/null 2>&1; then
     SPEECH_SETUP_STATUS="whisper model configured"
+    echo "Local speech support is ready."
   else
     SPEECH_SETUP_STATUS="speech setup skipped after a non-fatal error; run '$INSTALL_DIR/asynq-agentctl speech setup --install-model --restart' later"
+    echo "Local speech setup was skipped after a non-fatal error."
   fi
 else
   SPEECH_SETUP_STATUS="skipped by installer flag"
