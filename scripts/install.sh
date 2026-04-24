@@ -6,6 +6,7 @@ REPO_ROOT=${ASYNQ_AGENTD_SOURCE_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
 INSTALL_DIR_DEFAULT="${HOME}/.local/bin"
 RUNTIME_HOME_DEFAULT="${HOME}/.asynq-agentd"
 SERVICE_CHOICE_DEFAULT="user"
+LOCAL_DAEMON_URL_DEFAULT="http://127.0.0.1:7433"
 PUBLIC_URL_DEFAULT="http://127.0.0.1:7433"
 HOST_BIND_DEFAULT="127.0.0.1"
 PORT_DEFAULT="7433"
@@ -680,6 +681,11 @@ infer_access_mode_from_config() {
   esac
 }
 
+build_local_daemon_url() {
+  port=$1
+  printf 'http://127.0.0.1:%s' "$port"
+}
+
 if command -v asynq-agentd >/dev/null 2>&1; then
   detected_install_dir=$(dirname "$(command -v asynq-agentd)")
   if [ -n "${detected_install_dir:-}" ]; then
@@ -704,6 +710,7 @@ if [ "$REUSE_CONFIG" = "1" ]; then
     # shellcheck disable=SC1090
     . "$existing_env_file"
     RUNTIME_HOME_DEFAULT=${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME_DEFAULT}
+    LOCAL_DAEMON_URL_DEFAULT=${ASYNQ_AGENTD_URL:-$LOCAL_DAEMON_URL_DEFAULT}
     PUBLIC_URL_DEFAULT=${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL_DEFAULT}
     HOST_BIND_DEFAULT=${HOST:-$HOST_BIND_DEFAULT}
     PORT_DEFAULT=${PORT:-$PORT_DEFAULT}
@@ -739,7 +746,7 @@ case "$ACCESS_MODE" in
     if [ -n "${TAILSCALE_HOST:-}" ]; then
       PUBLIC_URL_DEFAULT="http://$TAILSCALE_HOST:$PORT"
     else
-      PUBLIC_URL_DEFAULT="http://your-machine.tailnet.ts.net:$PORT"
+      PUBLIC_URL_DEFAULT="http://your-current-tailnet-host.ts.net:$PORT"
     fi
     ;;
   custom)
@@ -789,7 +796,8 @@ if [ "$ACCESS_MODE" = "tailscale" ]; then
     echo "Before confirming the public URL, do one of these:" >&2
     echo "  1. In another terminal run: $tailscale_bin up" >&2
     echo "  2. Complete login in the browser that command opens" >&2
-    echo "  3. Then enter a URL like: http://your-mac.tailnet.ts.net:$PORT" >&2
+    echo "  3. Find this Mac's current hostname with '$tailscale_bin status --json' and look for Self.DNSName" >&2
+    echo "  4. Then enter a URL like: http://your-current-tailnet-host.ts.net:$PORT" >&2
     echo >&2
   fi
 fi
@@ -800,6 +808,8 @@ if [ "$ACCESS_MODE" = "tailscale" ] && [ -z "${TAILSCALE_HOST:-}" ] && [ "${ASYN
   exit 1
 fi
 
+LOCAL_DAEMON_URL=$(build_local_daemon_url "$PORT")
+
 PUBLIC_URL=$(prompt "Public daemon URL to embed in pairing QR" "$PUBLIC_URL_DEFAULT")
 
 mkdir -p "$INSTALL_DIR" "$RUNTIME_HOME"
@@ -807,7 +817,7 @@ mkdir -p "$INSTALL_DIR" "$RUNTIME_HOME"
 ENV_FILE="$RUNTIME_HOME/asynq-agentd.env"
 cat >"$ENV_FILE" <<EOF
 ASYNQ_AGENTD_HOME=$RUNTIME_HOME
-ASYNQ_AGENTD_URL=$PUBLIC_URL
+ASYNQ_AGENTD_URL=$LOCAL_DAEMON_URL
 ASYNQ_AGENTD_PUBLIC_URL=$PUBLIC_URL
 HOST=$HOST_BIND
 PORT=$PORT
@@ -825,7 +835,7 @@ set -eu
 ENV_FILE="\${ASYNQ_AGENTD_ENV_FILE:-$ENV_FILE}"
 [ -f "\$ENV_FILE" ] && . "\$ENV_FILE"
 export ASYNQ_AGENTD_HOME="\${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME}"
-export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$PUBLIC_URL}"
+export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$LOCAL_DAEMON_URL}"
 export ASYNQ_AGENTD_PUBLIC_URL="\${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL}"
 export HOST="\${HOST:-$HOST_BIND}"
 export PORT="\${PORT:-$PORT}"
@@ -839,7 +849,7 @@ set -eu
 ENV_FILE="\${ASYNQ_AGENTD_ENV_FILE:-$ENV_FILE}"
 [ -f "\$ENV_FILE" ] && . "\$ENV_FILE"
 export ASYNQ_AGENTD_HOME="\${ASYNQ_AGENTD_HOME:-$RUNTIME_HOME}"
-export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$PUBLIC_URL}"
+export ASYNQ_AGENTD_URL="\${ASYNQ_AGENTD_URL:-$LOCAL_DAEMON_URL}"
 export ASYNQ_AGENTD_PUBLIC_URL="\${ASYNQ_AGENTD_PUBLIC_URL:-$PUBLIC_URL}"
 export HOST="\${HOST:-$HOST_BIND}"
 export PORT="\${PORT:-$PORT}"
@@ -870,7 +880,7 @@ if [ "$SERVICE_CHOICE" = "user" ]; then
       <key>ASYNQ_AGENTD_HOME</key>
       <string>$RUNTIME_HOME</string>
       <key>ASYNQ_AGENTD_URL</key>
-      <string>$PUBLIC_URL</string>
+      <string>$LOCAL_DAEMON_URL</string>
       <key>ASYNQ_AGENTD_PUBLIC_URL</key>
       <string>$PUBLIC_URL</string>
       <key>HOST</key>
@@ -911,6 +921,7 @@ After=default.target
 [Service]
 Type=simple
 Environment=ASYNQ_AGENTD_HOME=$RUNTIME_HOME
+Environment=ASYNQ_AGENTD_URL=$LOCAL_DAEMON_URL
 Environment=ASYNQ_AGENTD_PUBLIC_URL=$PUBLIC_URL
 Environment=HOST=$HOST_BIND
 Environment=PORT=$PORT
@@ -956,6 +967,7 @@ echo "env file: $ENV_FILE"
 echo "service: $SERVICE_STATUS"
 echo "speech: $SPEECH_SETUP_STATUS"
 echo "access mode: $ACCESS_MODE"
+echo "local daemon url: $LOCAL_DAEMON_URL"
 if [ "$ACCESS_MODE" = "tailscale" ]; then
   echo "tailscale status: $TAILSCALE_STATUS"
   if [ -n "${TAILSCALE_HOST:-}" ]; then
@@ -972,10 +984,10 @@ echo "Next steps:"
 echo "  1. Ensure $INSTALL_DIR is on PATH"
 echo "  2. Verify the daemon with: $INSTALL_DIR/asynq-agentctl status"
 echo "  3. If needed, inspect auth token at: $AUTH_HINT"
-echo "  4. For now, use the local CLI and API in this repo. Buddy web/mobile UI is not included here yet."
-echo "  5. When Buddy UI is available, use the pairing link or QR code shown below to connect it."
+echo "  4. Open Buddy at: https://buddy.asynq.org"
+echo "  5. Use the pairing link or QR code shown below to connect Buddy to this daemon."
 if [ "$ACCESS_MODE" = "tailscale" ] && [ -z "${TAILSCALE_HOST:-}" ]; then
-  echo "  6. Finish Tailscale login, then update $ENV_FILE if the final MagicDNS name differs"
+  echo "  6. Finish Tailscale login, find this Mac's current hostname with '$INSTALL_DIR/asynq-agentctl pairing --format json' or 'tailscale status --json', then update $ENV_FILE if needed"
 fi
 if [ "$SKIP_PAIRING" != "1" ]; then
   if [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10; then
