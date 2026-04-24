@@ -269,6 +269,15 @@ function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+function canUseInsecureLocalTls(endpointRaw: string): boolean {
+  try {
+    const endpoint = new URL(endpointRaw);
+    return endpoint.protocol === "https:" && isLoopbackHost(endpoint.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function canTryLocalTlsFallback(endpointRaw: string): boolean {
   try {
     const endpoint = new URL(endpointRaw);
@@ -1330,7 +1339,7 @@ async function request(path: string, init?: RequestInit) {
   const primaryUrl = new URL(path, `${baseUrl}/`);
   let response: { status: number; text: string };
   try {
-    response = await requestJson(primaryUrl, token, init);
+    response = await requestJson(primaryUrl, token, init, canUseInsecureLocalTls(baseUrl));
   } catch (error) {
     if (canTryLocalTlsFallback(baseUrl)) {
       const fallbackBaseUrl = toHttpsUrl(baseUrl);
