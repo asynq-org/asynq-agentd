@@ -1,11 +1,13 @@
 import { accessSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, watchFile, writeFileSync, unwatchFile } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { homedir, networkInterfaces, platform, tmpdir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import QRCode from "qrcode";
 
-const baseUrl = process.env.ASYNQ_AGENTD_URL ?? process.env.AGENTD_URL ?? "http://127.0.0.1:7433";
+let baseUrl = process.env.ASYNQ_AGENTD_URL ?? process.env.AGENTD_URL ?? "http://127.0.0.1:7433";
 const publicUrl = process.env.ASYNQ_AGENTD_PUBLIC_URL ?? process.env.AGENTD_PUBLIC_URL ?? baseUrl;
 const runtimeHome = process.env.ASYNQ_AGENTD_HOME ?? process.env.AGENTD_HOME;
 const servicePlatform = platform();
@@ -223,6 +225,10 @@ function updatePublicUrlInEnv(nextPublicUrl: string): string | undefined {
   return updateEnvFileValue("ASYNQ_AGENTD_PUBLIC_URL", nextPublicUrl);
 }
 
+function updateLocalUrlInEnv(nextLocalUrl: string): string | undefined {
+  return updateEnvFileValue("ASYNQ_AGENTD_URL", nextLocalUrl);
+}
+
 function firstIpv4FromText(value: string): string | undefined {
   const lines = value
     .split("\n")
@@ -257,6 +263,25 @@ function withHost(endpointRaw: string, host: string): string {
   const next = new URL(endpointRaw);
   next.hostname = host;
   return next.toString().replace(/\/$/, "");
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+function canTryLocalTlsFallback(endpointRaw: string): boolean {
+  try {
+    const endpoint = new URL(endpointRaw);
+    return endpoint.protocol === "http:" && isLoopbackHost(endpoint.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function toHttpsUrl(endpointRaw: string): string {
+  const endpoint = new URL(endpointRaw);
+  endpoint.protocol = "https:";
+  return endpoint.toString().replace(/\/$/, "");
 }
 
 function tryHttpIpFallback(args: string[], endpointRaw: string, tailscalePath?: string): { endpoint: string; notes: string[] } | null {
@@ -484,6 +509,14 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
     notes.push(`Persisted ASYNQ_AGENTD_PUBLIC_URL in ${persistedEnvPath}.`);
   } else {
     notes.push("Could not persist ASYNQ_AGENTD_PUBLIC_URL automatically.");
+  }
+  const nextLocalUrl = toHttpsUrl(baseUrl);
+  const persistedLocalUrlPath = updateLocalUrlInEnv(nextLocalUrl);
+  if (persistedLocalUrlPath) {
+    baseUrl = nextLocalUrl;
+    notes.push(`Persisted ASYNQ_AGENTD_URL in ${persistedLocalUrlPath}.`);
+  } else {
+    notes.push("Could not persist ASYNQ_AGENTD_URL automatically.");
   }
   return { endpoint: nextEndpoint, notes };
 }
@@ -845,18 +878,21 @@ async function configureTls(args: string[]): Promise<void> {
   }
 
   if (action === "disable") {
-    const updated = await request("/config", {
-      method: "PATCH",
-      body: JSON.stringify({
-        tls: {
-          enabled: false,
-        },
-      }),
-    });
+  const updated = await request("/config", {
+    method: "PATCH",
+    body: JSON.stringify({
+      tls: {
+        enabled: false,
+      },
+    }),
+  });
+  const nextLocalUrl = baseUrl.replace(/^https:/, "http:");
+  updateLocalUrlInEnv(nextLocalUrl);
+  baseUrl = nextLocalUrl;
 
-    print({
-      ok: true,
-      tls: updated?.tls ?? { enabled: false },
+  print({
+    ok: true,
+    tls: updated?.tls ?? { enabled: false },
       restart_required: true,
     });
     return;
@@ -878,6 +914,9 @@ async function configureTls(args: string[]): Promise<void> {
       },
     }),
   });
+  const nextLocalUrl = toHttpsUrl(baseUrl);
+  updateLocalUrlInEnv(nextLocalUrl);
+  baseUrl = nextLocalUrl;
 
   print({
     ok: true,
@@ -1245,26 +1284,72 @@ async function configureSpeech(args: string[]): Promise<void> {
   });
 }
 
+function requestJson(url: URL, token: string | undefined, init?: RequestInit, insecureTls = false): Promise<{ status: number; text: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const isHttps = url.protocol === "https:";
+    const requestFn = isHttps ? httpsRequest : httpRequest;
+    const headers = {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    };
+    const req = requestFn({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: init?.method ?? "GET",
+      headers,
+      ...(isHttps && insecureTls ? { rejectUnauthorized: false } : {}),
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      res.on("end", () => {
+        resolvePromise({
+          status: res.statusCode ?? 0,
+          text: Buffer.concat(chunks).toString("utf8"),
+        });
+      });
+    });
+
+    req.on("error", (error) => {
+      rejectPromise(error);
+    });
+
+    if (init?.body) {
+      req.write(init.body as string);
+    }
+    req.end();
+  });
+}
+
 async function request(path: string, init?: RequestInit) {
   const token = resolveToken();
-  let response: Response;
+  const primaryUrl = new URL(path, `${baseUrl}/`);
+  let response: { status: number; text: string };
   try {
-    response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-        ...(init?.headers ?? {}),
-      },
-    });
+    response = await requestJson(primaryUrl, token, init);
   } catch (error) {
-    throw new Error(`fetch failed for ${baseUrl}${path}: ${error instanceof Error ? error.message : String(error)}`);
+    if (canTryLocalTlsFallback(baseUrl)) {
+      const fallbackBaseUrl = toHttpsUrl(baseUrl);
+      const fallbackUrl = new URL(path, `${fallbackBaseUrl}/`);
+      try {
+        response = await requestJson(fallbackUrl, token, init, true);
+        baseUrl = fallbackBaseUrl;
+        updateLocalUrlInEnv(fallbackBaseUrl);
+      } catch (fallbackError) {
+        throw new Error(`fetch failed for ${baseUrl}${path}: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+      }
+    } else {
+      throw new Error(`fetch failed for ${baseUrl}${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : undefined;
+  const body = response.text ? JSON.parse(response.text) : undefined;
 
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(body?.error ?? `Request failed with status ${response.status}`);
   }
 
