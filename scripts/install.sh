@@ -333,6 +333,23 @@ wait_for_auth() {
   return 1
 }
 
+wait_for_daemon_api() {
+  ctl_bin=$1
+  timeout_seconds=$2
+  elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if "$ctl_bin" status 2>/dev/null | grep -q '"reachable": true'; then
+      return 0
+    fi
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  return 1
+}
+
 wait_for_tailscale_host() {
   timeout_seconds=$1
   elapsed=0
@@ -990,19 +1007,34 @@ if [ "$ACCESS_MODE" = "tailscale" ] && [ -z "${TAILSCALE_HOST:-}" ]; then
   echo "  6. Finish Tailscale login, find this Mac's current hostname with '$INSTALL_DIR/asynq-agentctl pairing --format json' or 'tailscale status --json', then update $ENV_FILE if needed"
 fi
 if [ "$SKIP_PAIRING" != "1" ]; then
-  if [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10; then
+  pairing_ready=0
+
+  if [ -f "$AUTH_HINT" ]; then
+    if [ "$SERVICE_CHOICE" != "user" ] || wait_for_daemon_api "$INSTALL_DIR/asynq-agentctl" 15; then
+      pairing_ready=1
+    fi
+  elif [ "$SERVICE_CHOICE" = "user" ] && wait_for_auth "$AUTH_HINT" 10 && wait_for_daemon_api "$INSTALL_DIR/asynq-agentctl" 15; then
+    pairing_ready=1
+  fi
+
+  if [ "$pairing_ready" = "1" ]; then
     echo
     echo "Daemon auth token detected. Pairing is ready (opening browser QR):"
     "$INSTALL_DIR/asynq-agentctl" pairing --open-qr --no-qr --public-url "$PUBLIC_URL"
   elif [ -f "$AUTH_HINT" ]; then
-    if confirm "Print pairing URI and open browser QR now?" "yes"; then
+    if confirm "The auth token exists, but the daemon API is not reachable yet. Print pairing URI and open browser QR anyway?" "no"; then
       echo
       "$INSTALL_DIR/asynq-agentctl" pairing --open-qr --no-qr --public-url "$PUBLIC_URL"
+    else
+      echo
+      echo "Pairing QR is not ready yet because the daemon API is still starting."
+      echo "After '$INSTALL_DIR/asynq-agentctl status' reports reachable, run:"
+      echo "  $INSTALL_DIR/asynq-agentctl pairing --open-qr --no-qr --public-url $PUBLIC_URL"
     fi
   else
     echo
-    echo "Pairing QR is not ready yet because auth.json does not exist."
-    echo "After the daemon starts and creates $AUTH_HINT, run:"
+    echo "Pairing QR is not ready yet because the daemon has not finished starting."
+    echo "After the daemon starts and 'asynq-agentctl status' reports reachable, run:"
     echo "  $INSTALL_DIR/asynq-agentctl pairing --open-qr --no-qr --public-url $PUBLIC_URL"
   fi
 fi

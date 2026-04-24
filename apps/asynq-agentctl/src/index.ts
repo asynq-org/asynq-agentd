@@ -85,6 +85,12 @@ function sanitizeFilePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, ms);
+  });
+}
+
 function isLikelyIpv4(value: string): boolean {
   return /^(\d{1,3}\.){3}\d{1,3}$/.test(value.trim());
 }
@@ -444,7 +450,7 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
   }
 
   try {
-    await request("/config", {
+    await requestWithRetries("/config", {
       method: "PATCH",
       body: JSON.stringify({
         tls: {
@@ -453,7 +459,7 @@ async function tryAutoHttpsPairing(args: string[], endpointRaw: string): Promise
           key_path: keyPath,
         },
       }),
-    });
+    }, 8, 1000);
   } catch (error) {
     notes.push(`Auto HTTPS cert is ready, but enabling daemon TLS failed (${error instanceof Error ? error.message : String(error)}).`);
     const ipFallback = tryHttpIpFallback(args, endpointRaw, tailscale);
@@ -1241,14 +1247,19 @@ async function configureSpeech(args: string[]): Promise<void> {
 
 async function request(path: string, init?: RequestInit) {
   const token = resolveToken();
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    throw new Error(`fetch failed for ${baseUrl}${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   const text = await response.text();
   const body = text ? JSON.parse(text) : undefined;
@@ -1258,6 +1269,31 @@ async function request(path: string, init?: RequestInit) {
   }
 
   return body;
+}
+
+function isRetryableTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return error.message.includes("fetch failed");
+}
+
+async function requestWithRetries(path: string, init: RequestInit, attempts = 5, delayMs = 1000) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await request(path, init);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableTransportError(error) || attempt === attempts) {
+        throw error;
+      }
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function main(): Promise<void> {
