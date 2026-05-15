@@ -1,6 +1,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import type {
   ActivityPayload,
@@ -22,6 +23,18 @@ const MAX_FULL_CODEX_SESSION_BYTES = 4 * 1024 * 1024;
 const CODEX_SESSION_HEAD_BYTES = 256 * 1024;
 const CODEX_SESSION_TAIL_BYTES = 1024 * 1024;
 const CLAUDE_DESKTOP_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+
+export function cursorFileUriToPath(value: string, windows = process.platform === "win32"): string {
+  if (!value.startsWith("file://")) {
+    return value;
+  }
+
+  try {
+    return fileURLToPath(value, { windows });
+  } catch {
+    return value.replace(/^file:\/\//, "");
+  }
+}
 
 interface ClaudeSessionMeta {
   pid: number;
@@ -1175,15 +1188,7 @@ export class RecentWorkService {
   }
 
   private fileUriToPath(value: string): string {
-    if (!value.startsWith("file://")) {
-      return value;
-    }
-
-    try {
-      return decodeURIComponent(new URL(value).pathname);
-    } catch {
-      return value.replace(/^file:\/\//, "");
-    }
+    return cursorFileUriToPath(value);
   }
 
   private extractCursorConversationCandidates(payload: unknown, sourceKey: string): CursorConversationCandidate[] {
@@ -1331,11 +1336,12 @@ export class RecentWorkService {
     const updatedAt = candidate.updatedAt ?? fallbackUpdatedAt;
     const recentTimestampMs = Date.parse(updatedAt);
     const isActive = Number.isFinite(recentTimestampMs) && Date.now() - recentTimestampMs <= CLAUDE_DESKTOP_ACTIVE_WINDOW_MS;
+    const projectPath = this.pickString(candidate.projectPath, fallbackProjectPath);
 
     return {
       id: "cursor_" + candidate.id,
       source_path: sourcePath,
-      project_path: this.pickString(candidate.projectPath, fallbackProjectPath),
+      project_path: projectPath ? this.fileUriToPath(projectPath) : undefined,
       title: this.compactImportedTitle(candidate.title ?? lastUserMessage ?? "Cursor conversation " + candidate.id),
       summary: lastAgentMessage ?? lastUserMessage,
       source_type: "cursor-session",

@@ -1,8 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import {
   audioMimeTypeToExtension,
   decodePathSegment,
+  listRecentProjectOptions,
+  listWorkspaceProjectOptions,
+  mergeProjectOptions,
   parseTerminalControlMessage,
   pickSourceCodexSessionId,
   resolveAudioTranscriptionConfig,
@@ -126,6 +132,53 @@ test("sanitizeAudioName normalizes unsafe characters", () => {
   assert.equal(
     sanitizeAudioName(undefined, 1, "audio/wav"),
     "02-prompt-2.wav",
+  );
+});
+
+test("listWorkspaceProjectOptions returns direct subdirectories", () => {
+  const root = resolve(tmpdir(), `asynq-agentd-projects-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(resolve(root, "zeta"), { recursive: true });
+  mkdirSync(resolve(root, "alpha"), { recursive: true });
+  mkdirSync(resolve(root, ".hidden"), { recursive: true });
+  writeFileSync(resolve(root, "notes.txt"), "not a project\n", "utf8");
+
+  try {
+    assert.deepEqual(
+      listWorkspaceProjectOptions(root).map((item) => ({ name: item.name, path: item.path, source: item.source })),
+      [
+        { name: "alpha", path: resolve(root, "alpha"), source: "workspace" },
+        { name: "zeta", path: resolve(root, "zeta"), source: "workspace" },
+      ],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recent project options deduplicate by newest use and merge with workspace options", () => {
+  const alpha = resolve(tmpdir(), "alpha");
+  const beta = resolve(tmpdir(), "beta");
+
+  const recent = listRecentProjectOptions([
+    { project_path: alpha, updated_at: "2026-01-02T00:00:00.000Z" },
+    { project_path: alpha, updated_at: "2026-01-03T00:00:00.000Z" },
+    { project_path: beta, updated_at: "2026-01-01T00:00:00.000Z" },
+  ]);
+
+  assert.deepEqual(recent.map((item) => [item.path, item.last_used_at]), [
+    [alpha, "2026-01-03T00:00:00.000Z"],
+    [beta, "2026-01-01T00:00:00.000Z"],
+  ]);
+
+  assert.deepEqual(
+    mergeProjectOptions([
+      { name: "alpha", path: alpha, source: "workspace" },
+      ...recent,
+    ]).map((item) => ({ path: item.path, source: item.source, lastUsedAt: item.last_used_at })),
+    [
+      { path: alpha, source: "workspace", lastUsedAt: "2026-01-03T00:00:00.000Z" },
+      { path: beta, source: "recent", lastUsedAt: "2026-01-01T00:00:00.000Z" },
+    ],
   );
 });
 

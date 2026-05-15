@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer as createHttpListener, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createServer as createHttpsListener, type Server as HttpsServer } from "node:https";
@@ -58,6 +58,13 @@ interface MarkdownExportInput {
 interface OpenExportInput {
   path?: string;
   reveal?: boolean;
+}
+
+export interface ProjectOption {
+  name: string;
+  path: string;
+  source: "workspace" | "recent";
+  last_used_at?: string;
 }
 
 interface ImageAttachmentInput {
@@ -572,6 +579,129 @@ function pickString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
+export function resolveUserPath(input: string | undefined, homePath = homedir()): string | undefined {
+  const trimmed = input?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  if (trimmed === "~") {
+    return homePath;
+  }
+
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return resolve(homePath, trimmed.slice(2));
+  }
+
+  return resolve(trimmed);
+}
+
+function projectNameFromPath(projectPath: string): string {
+  const parts = projectPath.split(/[/\\]/).filter(Boolean);
+  return parts.at(-1) ?? projectPath;
+}
+
+function directoryExists(projectPath: string): boolean {
+  try {
+    return statSync(projectPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export function listWorkspaceProjectOptions(rootPath: string | undefined, limit = 100): ProjectOption[] {
+  const resolvedRootPath = resolveUserPath(rootPath);
+  if (!resolvedRootPath || !directoryExists(resolvedRootPath)) {
+    return [];
+  }
+
+  return readdirSync(resolvedRootPath, { withFileTypes: true })
+    .filter((entry) => {
+      if (entry.name.startsWith(".")) {
+        return false;
+      }
+
+      if (entry.isDirectory()) {
+        return true;
+      }
+
+      if (!entry.isSymbolicLink()) {
+        return false;
+      }
+
+      return directoryExists(resolve(resolvedRootPath, entry.name));
+    })
+    .map((entry) => {
+      const path = resolve(resolvedRootPath, entry.name);
+      return {
+        name: entry.name,
+        path,
+        source: "workspace" as const,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+    .slice(0, limit);
+}
+
+export function listRecentProjectOptions(
+  records: Array<{ project_path?: string; updated_at?: string; created_at?: string }>,
+  limit = 100,
+): ProjectOption[] {
+  const byPath = new Map<string, ProjectOption>();
+
+  for (const record of records) {
+    const path = resolveUserPath(record.project_path);
+    if (!path) {
+      continue;
+    }
+
+    const lastUsedAt = pickString(record.updated_at, record.created_at);
+    const current = byPath.get(path);
+    if (!current || (lastUsedAt ?? "") > (current.last_used_at ?? "")) {
+      byPath.set(path, {
+        name: projectNameFromPath(path),
+        path,
+        source: "recent",
+        last_used_at: lastUsedAt,
+      });
+    }
+  }
+
+  return [...byPath.values()]
+    .sort((a, b) => (b.last_used_at ?? "").localeCompare(a.last_used_at ?? "") || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+export function mergeProjectOptions(options: ProjectOption[], limit = 150): ProjectOption[] {
+  const byPath = new Map<string, ProjectOption>();
+
+  for (const option of options) {
+    const current = byPath.get(option.path);
+    if (!current) {
+      byPath.set(option.path, option);
+      continue;
+    }
+
+    byPath.set(option.path, {
+      ...current,
+      source: current.source === "workspace" || option.source === "workspace" ? "workspace" : "recent",
+      last_used_at: [current.last_used_at, option.last_used_at].filter(Boolean).sort().at(-1),
+    });
+  }
+
+  return [...byPath.values()]
+    .sort((a, b) => {
+      if (a.source !== b.source) {
+        return a.source === "workspace" ? -1 : 1;
+      }
+      if (a.source === "recent") {
+        return (b.last_used_at ?? "").localeCompare(a.last_used_at ?? "") || a.name.localeCompare(b.name);
+      }
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    })
+    .slice(0, limit);
+}
+
 function pickResumeSessionId(session: ReturnType<SessionService["getRecord"]>, task: ReturnType<TaskService["get"]>) {
   if (!session) {
     return undefined;
@@ -893,6 +1023,23 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
 
       if (method === "GET" && path === "/sessions") {
         send(200, services.sessions.list());
+        return;
+      }
+
+      if (method === "GET" && path === "/projects") {
+        const limit = parsePositiveInt(url.searchParams.get("limit")) ?? 100;
+        const rootPath = pickString(url.searchParams.get("root_path"), url.searchParams.get("root"));
+        const workspaceProjects = listWorkspaceProjectOptions(rootPath, limit);
+        const recentProjects = listRecentProjectOptions([
+          ...services.storage.listSessions(),
+          ...services.storage.listTasks(),
+          ...services.storage.listRecentWork(),
+        ], limit);
+        send(200, {
+          generated_at: new Date().toISOString(),
+          root_path: rootPath ? resolveUserPath(rootPath) : undefined,
+          items: mergeProjectOptions([...workspaceProjects, ...recentProjects], limit),
+        });
         return;
       }
 

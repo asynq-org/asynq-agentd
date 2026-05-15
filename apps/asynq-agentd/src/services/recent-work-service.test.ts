@@ -6,12 +6,23 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { TaskService } from "./task-service.ts";
-import { RecentWorkService } from "./recent-work-service.ts";
+import { cursorFileUriToPath, RecentWorkService } from "./recent-work-service.ts";
 import { EventStreamService } from "./event-stream-service.ts";
 
 function encodeClaudeProjectPath(projectPath: string): string {
   return projectPath.replace(/[\\/]/g, "-");
 }
+
+test("Cursor file URI decoding preserves Windows drive-letter paths", () => {
+  assert.equal(
+    cursorFileUriToPath("file://C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\project", true),
+    "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\project",
+  );
+  assert.equal(
+    cursorFileUriToPath("file:///C:/Users/RUNNER~1/AppData/Local/Temp/project", true),
+    "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\project",
+  );
+});
 
 test("recent work scan indexes claude-like files and continue creates a task", () => {
   const root = mkdtempSync(join(tmpdir(), "asynq-agentd-recent-"));
