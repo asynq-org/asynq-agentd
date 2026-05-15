@@ -13,6 +13,7 @@ export interface RuntimePaths {
   claudePath: string;
   claudeDesktopPath: string;
   codexPath: string;
+  cursorPath: string;
 }
 
 export function resolveRuntimePaths(cwd: string): RuntimePaths {
@@ -32,6 +33,11 @@ export function resolveRuntimePaths(cwd: string): RuntimePaths {
       ? resolve(process.env.CLAUDE_DESKTOP_HOME)
       : resolve(process.env.HOME ?? "~", "Library", "Application Support", "Claude"),
     codexPath: process.env.CODEX_HOME ? resolve(process.env.CODEX_HOME) : resolve(process.env.HOME ?? "~", ".codex"),
+    cursorPath: process.env.CURSOR_USER_HOME
+      ? resolve(process.env.CURSOR_USER_HOME)
+      : process.env.ASYNQ_AGENTD_CURSOR_HOME
+        ? resolve(process.env.ASYNQ_AGENTD_CURSOR_HOME)
+        : resolve(process.env.HOME ?? "~", "Library", "Application Support", "Cursor", "User"),
   };
 }
 

@@ -44,6 +44,12 @@ export class RuntimeDiscoveryService {
         "/Applications/Codex.app/Contents/Resources/codex",
         resolve(home, ".local/bin/codex"),
       ]);
+    const cursorPath = process.env.ASYNQ_AGENTD_CURSOR_BIN
+      ?? process.env.CURSOR_BIN
+      ?? findExecutable("cursor-agent", [
+        resolve(home, ".local/bin/cursor-agent"),
+        resolve(home, ".cursor/bin/cursor-agent"),
+      ]);
     const opencodePath = process.env.ASYNQ_AGENTD_OPENCODE_BIN
       ?? process.env.OPENCODE_BIN
       ?? findExecutable("opencode", [resolve(home, ".opencode/bin/opencode")]);
@@ -61,6 +67,13 @@ export class RuntimeDiscoveryService {
         adapter: "codex-cli",
         available: Boolean(codexPath),
         path: codexPath,
+        mode: "real",
+      },
+      {
+        id: "cursor",
+        adapter: "cursor-cli",
+        available: Boolean(cursorPath),
+        path: cursorPath,
         mode: "real",
       },
       {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { AsynqAgentdStorage } from "../db/storage.ts";
 import { TaskService } from "./task-service.ts";
 import { RecentWorkService } from "./recent-work-service.ts";
@@ -1053,6 +1054,65 @@ test("recent work scan survives oversized Codex session files by sampling head a
   assert.equal(record?.project_path, projectRoot);
   assert.equal(record?.summary, "Recent-work scan should not crash on oversized Codex transcripts.");
   assert.equal(record?.status, "ended");
+
+  storage.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+
+test("recent work scan indexes Cursor IDE state databases and takeovers", () => {
+  const root = mkdtempSync(join(tmpdir(), "asynq-agentd-cursor-recent-"));
+  const storage = new AsynqAgentdStorage(join(root, "test.sqlite"));
+  const tasks = new TaskService(storage);
+  const cursorRoot = resolve(root, "Cursor", "User");
+  const workspaceRoot = resolve(cursorRoot, "workspaceStorage", "workspace-1");
+  const projectRoot = resolve(root, "project");
+  mkdirSync(workspaceRoot, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(resolve(workspaceRoot, "workspace.json"), JSON.stringify({ folder: "file://" + projectRoot }));
+
+  const dbPath = resolve(workspaceRoot, "state.vscdb");
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  db.prepare("INSERT INTO ItemTable(key, value) VALUES (?, ?)").run("composer.composerData", JSON.stringify({
+    composers: [{
+      composerId: "cursor-chat-1",
+      title: "Update Cursor support",
+      updatedAt: "2026-04-01T10:00:00.000Z",
+      messages: [
+        { role: "user", text: "Add Cursor IDE support" },
+        { role: "assistant", text: "I need approval to run the backup command." },
+      ],
+      pendingApproval: {
+        command: "cp package.json package.json.backup",
+        reason: "Back up package metadata before editing.",
+        status: "awaiting_approval",
+      },
+    }],
+  }));
+  db.close();
+
+  const recentWork = new RecentWorkService(storage, tasks, {
+    claudePath: resolve(root, "missing-claude"),
+    codexPath: resolve(root, "missing-codex"),
+    cursorPath: cursorRoot,
+  });
+
+  const indexed = recentWork.scan();
+  assert.equal(indexed.length, 1);
+  assert.equal(indexed[0]?.id, "cursor_cursor-chat-1");
+  assert.equal(indexed[0]?.source_type, "cursor-session");
+  assert.equal(indexed[0]?.project_path, projectRoot);
+  assert.equal(indexed[0]?.metadata?.cursor_conversation_id, "cursor-chat-1");
+  assert.equal((indexed[0]?.metadata?.pending_observed_review as { cmd?: string } | undefined)?.cmd, "cp package.json package.json.backup");
+
+  const task = recentWork.continueRecentWork(indexed[0]!.id, "Take this over");
+  assert.equal(task.agent_type, "cursor");
+  assert.equal(task.context?.source_cursor_session_id, "cursor-chat-1");
+  assert.equal(task.context?.observed_takeover?.cmd, "cp package.json package.json.backup");
+
+  const activity = recentWork.listImportedActivity(indexed[0]!.id);
+  assert.ok(activity.some((event) => event.payload.type === "approval_requested"));
 
   storage.close();
   rmSync(root, { recursive: true, force: true });

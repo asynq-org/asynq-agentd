@@ -11,6 +11,7 @@ import { RecentWorkService } from "./services/recent-work-service.ts";
 import { MockAgentAdapter } from "./adapters/mock-adapter.ts";
 import { CodexCliAdapter } from "./adapters/codex-adapter.ts";
 import { ClaudeCliAdapter } from "./adapters/claude-adapter.ts";
+import { CursorCliAdapter } from "./adapters/cursor-adapter.ts";
 import { EventStreamService } from "./services/event-stream-service.ts";
 import { TerminalStreamService } from "./services/terminal-stream-service.ts";
 import { DashboardService } from "./services/dashboard-service.ts";
@@ -50,16 +51,21 @@ const adapters = new Map([
     binPath: discoveredRuntimes.get("codex")?.path,
     codexHome: runtimePaths.codexPath,
   })],
+  ["cursor", new CursorCliAdapter({
+    binPath: discoveredRuntimes.get("cursor")?.path,
+  })],
   ["opencode", new MockAgentAdapter()],
   ["custom", new MockAgentAdapter()],
 ]);
 const codexAdapter = adapters.get("codex");
 const claudeAdapter = adapters.get("claude-code");
+const cursorAdapter = adapters.get("cursor");
 const scheduler = new SchedulerService(storage, tasks, sessions, config, adapters, undefined, undefined, terminalStreams);
 const recentWork = new RecentWorkService(storage, tasks, {
   claudePath: runtimePaths.claudePath,
   claudeDesktopPath: runtimePaths.claudeDesktopPath,
   codexPath: runtimePaths.codexPath,
+  cursorPath: runtimePaths.cursorPath,
   events: liveEvents,
   onRecentWorkBatchUpdated: (records) => {
     summaries.prepareContinueCards(records);
@@ -78,6 +84,7 @@ const dashboard = new DashboardService({
   codexObservedBridgeAvailable: codexGuiBridge.isAvailable(),
   codexResumeContinuationAvailable: Boolean(codexAdapter?.appendToConversation),
   claudeResumeContinuationAvailable: Boolean(claudeAdapter?.appendToConversation),
+  cursorResumeContinuationAvailable: Boolean(cursorAdapter?.appendToConversation),
 });
 const observedResolution = new ObservedResolutionService({
   dashboard,
@@ -85,6 +92,7 @@ const observedResolution = new ObservedResolutionService({
   scheduler,
   codexAdapter,
   claudeAdapter,
+  cursorAdapter,
   codexBridge: codexGuiBridge,
 });
 const activeConfig = config.get();

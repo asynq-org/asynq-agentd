@@ -480,7 +480,8 @@ export class SchedulerService {
     const session = this.sessions.getRecord(sessionId);
     const targetConversationId = pickString(
       task?.context?.source_codex_session_id,
-      task?.agent_type === "codex" ? task?.context?.source_recent_work_id : undefined,
+      task?.context?.source_cursor_session_id,
+      task?.agent_type === "codex" || task?.agent_type === "cursor" ? task?.context?.source_recent_work_id : undefined,
     ) ?? "";
     if (!task || !session || !targetConversationId) {
       return;
@@ -490,19 +491,19 @@ export class SchedulerService {
       return;
     }
 
-    const codexAdapter = this.adapters.get("codex");
-    if (!codexAdapter?.appendToConversation) {
+    const relayAdapter = this.adapters.get(task.agent_type);
+    if (!relayAdapter?.appendToConversation) {
       return;
     }
 
     const prompt = this.buildManagedHandoffPrompt(task, session, outcome);
     this.sessions.recordEvent(sessionId, {
       type: "agent_thinking",
-      summary: `Relaying managed handoff back to observed Codex thread ${targetConversationId}.`,
+      summary: `Relaying managed handoff back to observed ${task.agent_type} thread ${targetConversationId}.`,
     });
 
     try {
-      await codexAdapter.appendToConversation(targetConversationId, prompt, {
+      await relayAdapter.appendToConversation(targetConversationId, prompt, {
         projectPath: task.project_path,
         modelPreference: task.model_preference,
       });
@@ -514,7 +515,7 @@ export class SchedulerService {
       });
       this.sessions.recordEvent(sessionId, {
         type: "agent_thinking",
-        summary: "Managed handoff was appended to the observed Codex thread.",
+        summary: `Managed handoff was appended to the observed ${task.agent_type} thread.`,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Managed handoff relay failed";

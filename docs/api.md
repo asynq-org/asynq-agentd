@@ -73,7 +73,7 @@ Example `POST /tasks` body:
 Important notes:
 
 - `project_path` must be absolute.
-- `agent_type` is one of `claude-code`, `codex`, `opencode`, or `custom`.
+- `agent_type` is one of `claude-code`, `codex`, `cursor`, `opencode`, or `custom`.
 - `priority` is one of `low`, `normal`, `high`, `urgent`.
 
 ### Approvals
@@ -166,7 +166,7 @@ The intent is to provide enough data for a home screen without multiple round tr
 - `tasks_paused`
 - `runtimes_ready`
 
-`runtimes[]` reflects daemon-detected runtime readiness for adapters such as Claude Code and Codex, so clients can show “ready runtimes” even when no daemon-managed session is currently running.
+`runtimes[]` reflects daemon-detected runtime readiness for adapters such as Claude Code, Codex, and Cursor, so clients can show “ready runtimes” even when no daemon-managed session is currently running.
 
 ### `GET /dashboard/attention-required`
 

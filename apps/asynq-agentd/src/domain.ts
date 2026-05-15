@@ -7,7 +7,7 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export const TASK_STATUSES = ["queued", "running", "paused", "completed", "failed"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export type AgentType = "claude-code" | "codex" | "opencode" | "custom";
+export type AgentType = "claude-code" | "codex" | "cursor" | "opencode" | "custom";
 
 export interface TakeoverSuccessCheck {
   kind: "path_exists" | "command_exit_zero";
@@ -30,6 +30,7 @@ export interface TaskContext {
   source_recent_work_id?: string;
   source_recent_work_updated_at?: string;
   source_codex_session_id?: string;
+  source_cursor_session_id?: string;
   observed_takeover?: ObservedTakeoverContext;
   recurring_history?: Array<{
     run_at: string;
@@ -202,7 +203,7 @@ export interface RecentWorkRecord {
   project_path?: string;
   title: string;
   summary?: string;
-  source_type: "claude-session" | "claude-desktop-session" | "claude-file" | "codex-session-index" | "codex-session-file";
+  source_type: "claude-session" | "claude-desktop-session" | "claude-file" | "codex-session-index" | "codex-session-file" | "cursor-session";
   status: "active" | "ended" | "unknown";
   updated_at: string;
   metadata?: Record<string, unknown>;

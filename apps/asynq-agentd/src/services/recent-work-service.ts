@@ -1,4 +1,5 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { createHash } from "node:crypto";
 import type {
@@ -51,6 +52,7 @@ interface RecentWorkServiceOptions {
   claudePath: string;
   claudeDesktopPath?: string;
   codexPath: string;
+  cursorPath?: string;
   events?: EventStreamService;
   onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
   onRecentWorkBatchUpdated?: (records: RecentWorkRecord[]) => void;
@@ -75,12 +77,24 @@ interface ClaudeDesktopSessionMeta {
   sourcePath: string;
 }
 
+interface CursorConversationCandidate {
+  id: string;
+  title?: string;
+  projectPath?: string;
+  model?: string;
+  updatedAt?: string;
+  createdAt?: string;
+  messages: Array<{ role: "user" | "assistant" | "unknown"; text: string; timestamp?: string }>;
+  pendingReview?: { action: string; context: string; cmd?: string; detected_at?: string; success_checks?: TakeoverSuccessCheck[] };
+}
+
 export class RecentWorkService {
   private readonly storage: AsynqAgentdStorage;
   private readonly tasks: TaskService;
   private readonly claudePath: string;
   private readonly claudeDesktopPath: string;
   private readonly codexPath: string;
+  private readonly cursorPath: string;
   private readonly events?: EventStreamService;
   private readonly onRecentWorkUpdated?: (record: RecentWorkRecord) => void;
   private readonly onRecentWorkBatchUpdated?: (records: RecentWorkRecord[]) => void;
@@ -94,6 +108,7 @@ export class RecentWorkService {
     this.claudePath = options.claudePath;
     this.claudeDesktopPath = options.claudeDesktopPath ?? "";
     this.codexPath = options.codexPath;
+    this.cursorPath = options.cursorPath ?? "";
     this.events = options.events;
     this.onRecentWorkUpdated = options.onRecentWorkUpdated;
     this.onRecentWorkBatchUpdated = options.onRecentWorkBatchUpdated;
@@ -116,7 +131,7 @@ export class RecentWorkService {
 
     return records.map((record) => ({
       ...record,
-      activity_preview: record.source_type === "codex-session-file" || record.source_type === "claude-session"
+      activity_preview: record.source_type === "codex-session-file" || record.source_type === "claude-session" || record.source_type === "cursor-session"
         ? this.filterActivityByType(this.listImportedActivity(record.id, previewLimit, compact), previewTypes)
         : [],
     }));
@@ -238,6 +253,20 @@ export class RecentWorkService {
       }
     }
 
+    if (this.cursorPath && existsSync(this.cursorPath)) {
+      for (const record of this.scanCursor()) {
+        const previous = this.storage.getRecentWork(record.id);
+        const merged = this.mergeWithPreviousRecord(record, previous);
+        this.storage.upsertRecentWork(merged);
+        if (this.didRecentWorkChange(previous, merged)) {
+          this.publishRecentWorkUpdate(merged, previous);
+          this.onRecentWorkUpdated?.(merged);
+          changed.push(merged);
+        }
+        discovered.push(merged);
+      }
+    }
+
     if (changed.length > 0) {
       this.onRecentWorkBatchUpdated?.(changed);
     }
@@ -257,7 +286,7 @@ export class RecentWorkService {
       this.scan();
     }, 5000);
 
-    for (const rootPath of [this.claudePath, this.claudeDesktopPath, this.codexPath]) {
+    for (const rootPath of [this.claudePath, this.claudeDesktopPath, this.codexPath, this.cursorPath]) {
       if (!existsSync(rootPath)) {
         continue;
       }
@@ -308,11 +337,12 @@ export class RecentWorkService {
         ? `Continue prior work from ${record.source_path}. ${contextSummary} Developer instruction: ${instruction}`
         : `Continue prior work from ${record.source_path}. ${contextSummary}`,
       project_path: record.project_path,
-      agent_type: record.source_type.startsWith("codex") ? "codex" : "claude-code",
+      agent_type: this.agentTypeForRecentWork(record),
       context: {
         source_recent_work_id: record.id,
         source_recent_work_updated_at: record.updated_at,
         source_codex_session_id: record.source_type.startsWith("codex") ? record.id : undefined,
+        source_cursor_session_id: record.source_type === "cursor-session" ? this.pickString(record.metadata?.cursor_conversation_id, record.id) : undefined,
         observed_takeover: observedTakeover,
         files_to_focus: inferredFocusFiles,
       },
@@ -333,7 +363,23 @@ export class RecentWorkService {
       return this.parseCodexActivity(record.source_path, record.id, limit, compact);
     }
 
+    if (record.source_type === "cursor-session") {
+      return this.parseCursorActivity(record.source_path, record.id, limit, compact);
+    }
+
     return [];
+  }
+
+  private agentTypeForRecentWork(record: RecentWorkRecord): "claude-code" | "codex" | "cursor" {
+    if (record.source_type.startsWith("codex")) {
+      return "codex";
+    }
+
+    if (record.source_type === "cursor-session") {
+      return "cursor";
+    }
+
+    return "claude-code";
   }
 
   private walk(root: string, depth: number): string[] {
@@ -964,6 +1010,464 @@ export class RecentWorkService {
 
   private createRecentWorkId(filePath: string): string {
     return `recent_${createHash("sha1").update(filePath).digest("hex")}`;
+  }
+
+  private scanCursor(): RecentWorkRecord[] {
+    const dbPaths = this.cursorStateDbPaths();
+    const records = new Map<string, RecentWorkRecord>();
+
+    for (const dbPath of dbPaths) {
+      const fallbackProjectPath = this.readCursorWorkspaceProjectPath(dbPath);
+      const stats = statSync(dbPath);
+      for (const row of this.readCursorStateRows(dbPath)) {
+        if (!this.isCursorConversationRow(row.key, row.value)) {
+          continue;
+        }
+
+        const payload = this.parseJsonIfObject(row.value);
+        if (!payload) {
+          continue;
+        }
+
+        for (const candidate of this.extractCursorConversationCandidates(payload, row.key)) {
+          const record = this.toCursorRecentWorkRecord(candidate, dbPath, stats.mtime.toISOString(), fallbackProjectPath);
+          if (record) {
+            records.set(record.id, this.mergeCursorRecord(record, records.get(record.id)));
+          }
+        }
+      }
+    }
+
+    return Array.from(records.values());
+  }
+
+  private mergeCursorRecord(record: RecentWorkRecord, previous?: RecentWorkRecord): RecentWorkRecord {
+    if (!previous) {
+      return record;
+    }
+
+    const previousCount = Number(previous.metadata?.message_count ?? 0);
+    const nextCount = Number(record.metadata?.message_count ?? 0);
+    const contentSource = nextCount >= previousCount ? record : previous;
+    const pathSource = record.project_path ? record : previous;
+
+    return {
+      ...contentSource,
+      project_path: pathSource.project_path,
+      updated_at: record.updated_at > previous.updated_at ? record.updated_at : previous.updated_at,
+      status: record.status === "active" || previous.status === "active" ? "active" : contentSource.status,
+      metadata: {
+        ...(previous.metadata ?? {}),
+        ...(record.metadata ?? {}),
+        raw_user_input: contentSource.metadata?.raw_user_input,
+        last_user_message: contentSource.metadata?.last_user_message,
+        last_agent_message: contentSource.metadata?.last_agent_message,
+        raw_agent_response: contentSource.metadata?.raw_agent_response,
+        message_count: contentSource.metadata?.message_count,
+        pending_observed_review: record.metadata?.pending_observed_review ?? previous.metadata?.pending_observed_review,
+      },
+    };
+  }
+
+  private cursorStateDbPaths(): string[] {
+    const paths: string[] = [];
+    const globalDb = join(this.cursorPath, "globalStorage", "state.vscdb");
+    if (existsSync(globalDb)) {
+      paths.push(globalDb);
+    }
+
+    const workspaceRoot = join(this.cursorPath, "workspaceStorage");
+    if (existsSync(workspaceRoot)) {
+      for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const dbPath = join(workspaceRoot, entry.name, "state.vscdb");
+        if (existsSync(dbPath)) {
+          paths.push(dbPath);
+        }
+      }
+    }
+
+    return paths;
+  }
+
+  private readCursorStateRows(dbPath: string): Array<{ key: string; value: string }> {
+    let db: DatabaseSync | undefined;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const tables = new Set(
+        (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>)
+          .map((row) => row.name),
+      );
+      const rows: Array<{ key: string; value: string }> = [];
+      for (const table of ["cursorDiskKV", "ItemTable"] as const) {
+        if (!tables.has(table)) {
+          continue;
+        }
+        const tableRows = db.prepare("SELECT key, value FROM " + table).all() as Array<{ key: unknown; value: unknown }>;
+        for (const row of tableRows) {
+          const key = this.pickString(row.key);
+          const value = this.cursorDbValueToString(row.value);
+          if (key && value) {
+            rows.push({ key, value });
+          }
+        }
+      }
+      return rows;
+    } catch {
+      return [];
+    } finally {
+      db?.close();
+    }
+  }
+
+  private cursorDbValueToString(value: unknown): string | undefined {
+    if (typeof value === "string") {
+      return value;
+    }
+
+    if (value instanceof Uint8Array) {
+      return Buffer.from(value).toString("utf8");
+    }
+
+    return undefined;
+  }
+
+  private isCursorConversationRow(key: string, value: string): boolean {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey.includes("composer") || normalizedKey.includes("aichat") || normalizedKey.includes("bubbleid")) {
+      return true;
+    }
+
+    return /\b(composer|chat|conversation|bubble)\b/i.test(value.slice(0, 500));
+  }
+
+  private readCursorWorkspaceProjectPath(dbPath: string): string | undefined {
+    const workspacePath = join(dirname(dbPath), "workspace.json");
+    if (!existsSync(workspacePath)) {
+      return undefined;
+    }
+
+    const payload = parseJsonSafe<Record<string, unknown>>(readFileSync(workspacePath, "utf8"), {});
+    return this.pickCursorPathFromWorkspace(payload);
+  }
+
+  private pickCursorPathFromWorkspace(payload: Record<string, unknown>): string | undefined {
+    const folder = this.pickString(payload.folder, payload.workspace);
+    if (folder) {
+      return this.fileUriToPath(folder);
+    }
+
+    if (Array.isArray(payload.folders)) {
+      for (const item of payload.folders) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const value = this.pickString((item as Record<string, unknown>).uri, (item as Record<string, unknown>).path);
+        if (value) {
+          return this.fileUriToPath(value);
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private fileUriToPath(value: string): string {
+    if (!value.startsWith("file://")) {
+      return value;
+    }
+
+    try {
+      return decodeURIComponent(new URL(value).pathname);
+    } catch {
+      return value.replace(/^file:\/\//, "");
+    }
+  }
+
+  private extractCursorConversationCandidates(payload: unknown, sourceKey: string): CursorConversationCandidate[] {
+    const candidates = new Map<string, CursorConversationCandidate>();
+    const visit = (value: unknown, depth: number) => {
+      if (!value || depth > 9) {
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          visit(item, depth + 1);
+        }
+        return;
+      }
+
+      if (typeof value !== "object") {
+        return;
+      }
+
+      const objectValue = value as Record<string, unknown>;
+      const messages = this.extractCursorMessages(objectValue);
+      if (messages.length > 0) {
+        const candidate = this.buildCursorConversationCandidate(objectValue, messages, sourceKey);
+        if (candidate) {
+          candidates.set(candidate.id, candidate);
+        }
+      }
+
+      for (const child of Object.values(objectValue)) {
+        visit(child, depth + 1);
+      }
+    };
+
+    visit(payload, 0);
+    return Array.from(candidates.values());
+  }
+
+  private buildCursorConversationCandidate(
+    payload: Record<string, unknown>,
+    messages: CursorConversationCandidate["messages"],
+    sourceKey: string,
+  ): CursorConversationCandidate | undefined {
+    const id = this.pickString(
+      payload.conversationId,
+      payload.composerId,
+      payload.chatId,
+      payload.sessionId,
+      payload.bubbleId,
+      payload.id,
+    ) ?? this.createRecentWorkId(sourceKey + ":" + messages.map((message) => message.text).join("|").slice(0, 500));
+    const title = this.pickString(payload.name, payload.title, payload.summary) ?? messages.find((message) => message.role === "user")?.text;
+    const updatedAt = this.normalizeTimestamp(
+      payload.updatedAt,
+      payload.lastUpdatedAt,
+      payload.lastMessageAt,
+      payload.timestamp,
+      messages.at(-1)?.timestamp,
+    );
+
+    return {
+      id,
+      title,
+      projectPath: this.pickString(payload.workspaceRootPath, payload.workspacePath, payload.projectPath, payload.cwd, payload.rootPath),
+      model: this.pickString(payload.model, payload.modelName),
+      updatedAt,
+      createdAt: this.normalizeTimestamp(payload.createdAt, payload.startedAt),
+      messages,
+      pendingReview: this.findCursorPendingReview(payload),
+    };
+  }
+
+  private extractCursorMessages(payload: Record<string, unknown>): CursorConversationCandidate["messages"] {
+    const containers = [payload.messages, payload.chatMessages, payload.conversation, payload.bubbles, payload.turns, payload.entries]
+      .filter((value): value is unknown[] => Array.isArray(value));
+    const messages: CursorConversationCandidate["messages"] = [];
+
+    for (const container of containers) {
+      for (const item of container) {
+        const message = this.toCursorMessage(item);
+        if (message) {
+          messages.push(message);
+        }
+      }
+    }
+
+    return messages;
+  }
+
+  private toCursorMessage(value: unknown): CursorConversationCandidate["messages"][number] | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    const objectValue = value as Record<string, unknown>;
+    const text = this.extractCursorText(objectValue);
+    if (!text) {
+      return undefined;
+    }
+
+    return {
+      role: this.normalizeCursorRole(this.pickString(objectValue.role, objectValue.type, objectValue.sender, objectValue.author)),
+      text,
+      timestamp: this.normalizeTimestamp(objectValue.timestamp, objectValue.createdAt, objectValue.updatedAt),
+    };
+  }
+
+  private extractCursorText(payload: Record<string, unknown>): string | undefined {
+    const direct = this.pickString(payload.text, payload.content, payload.message, payload.rawText, payload.markdown, payload.response);
+    if (direct) {
+      return this.sanitizeImportedMessageText(direct);
+    }
+
+    if (Array.isArray(payload.content)) {
+      const parts = payload.content
+        .map((item) => item && typeof item === "object" ? this.extractCursorText(item as Record<string, unknown>) : undefined)
+        .filter((value): value is string => Boolean(value));
+      return parts.length > 0 ? this.sanitizeImportedMessageText(parts.join("\n")) : undefined;
+    }
+
+    return undefined;
+  }
+
+  private normalizeCursorRole(value: string | undefined): "user" | "assistant" | "unknown" {
+    const normalized = value?.toLowerCase() ?? "";
+    if (normalized.includes("user") || normalized.includes("human")) {
+      return "user";
+    }
+
+    if (normalized.includes("assistant") || normalized.includes("ai") || normalized.includes("agent")) {
+      return "assistant";
+    }
+
+    return "unknown";
+  }
+
+  private toCursorRecentWorkRecord(
+    candidate: CursorConversationCandidate,
+    sourcePath: string,
+    fallbackUpdatedAt: string,
+    fallbackProjectPath?: string,
+  ): RecentWorkRecord | undefined {
+    const lastUserMessage = [...candidate.messages].reverse().find((message) => message.role === "user")?.text;
+    const lastAgentMessage = [...candidate.messages].reverse().find((message) => message.role === "assistant")?.text;
+    const updatedAt = candidate.updatedAt ?? fallbackUpdatedAt;
+    const recentTimestampMs = Date.parse(updatedAt);
+    const isActive = Number.isFinite(recentTimestampMs) && Date.now() - recentTimestampMs <= CLAUDE_DESKTOP_ACTIVE_WINDOW_MS;
+
+    return {
+      id: "cursor_" + candidate.id,
+      source_path: sourcePath,
+      project_path: this.pickString(candidate.projectPath, fallbackProjectPath),
+      title: this.compactImportedTitle(candidate.title ?? lastUserMessage ?? "Cursor conversation " + candidate.id),
+      summary: lastAgentMessage ?? lastUserMessage,
+      source_type: "cursor-session",
+      status: candidate.pendingReview || isActive ? "active" : "ended",
+      updated_at: updatedAt,
+      metadata: {
+        runtime_label: "Cursor IDE",
+        cursor_conversation_id: candidate.id,
+        model: candidate.model,
+        raw_user_input: lastUserMessage,
+        last_user_message: lastUserMessage,
+        last_agent_message: lastAgentMessage,
+        raw_agent_response: lastAgentMessage,
+        started_at: candidate.createdAt,
+        message_count: candidate.messages.length,
+        pending_observed_review: candidate.pendingReview,
+      },
+    };
+  }
+
+  private compactImportedTitle(value: string): string {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    return normalized.length <= 120 ? normalized : normalized.slice(0, 117).trimEnd() + "...";
+  }
+
+  private findCursorPendingReview(payload: unknown): CursorConversationCandidate["pendingReview"] | undefined {
+    const visit = (value: unknown, depth: number): CursorConversationCandidate["pendingReview"] | undefined => {
+      if (!value || depth > 8) {
+        return undefined;
+      }
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = visit(item, depth + 1);
+          if (found) {
+            return found;
+          }
+        }
+        return undefined;
+      }
+
+      if (typeof value !== "object") {
+        return undefined;
+      }
+
+      const objectValue = value as Record<string, unknown>;
+      const command = this.pickString(objectValue.command, objectValue.cmd, objectValue.shellCommand, objectValue.terminalCommand);
+      const status = this.pickString(objectValue.status, objectValue.state, objectValue.type, objectValue.subtype)?.toLowerCase() ?? "";
+      const keyText = Object.keys(objectValue).join(" ").toLowerCase();
+      const needsApproval = Boolean(objectValue.requiresApproval)
+        || Boolean(objectValue.pendingApproval)
+        || Boolean(objectValue.needsApproval)
+        || Boolean(objectValue.awaitingApproval)
+        || /approval|permission|confirm|awaiting/.test(status)
+        || /approval|permission|confirm|awaiting/.test(keyText);
+      if (command && needsApproval) {
+        return {
+          action: "Approve command: " + (command.length > 96 ? command.slice(0, 95).trimEnd() + "..." : command),
+          context: this.pickString(objectValue.reason, objectValue.justification, objectValue.description)
+            ?? "Cursor is waiting for approval before running: " + command,
+          cmd: command,
+          detected_at: this.normalizeTimestamp(objectValue.timestamp, objectValue.createdAt, objectValue.updatedAt) ?? nowIso(),
+          success_checks: this.inferSuccessChecks(command),
+        };
+      }
+
+      for (const child of Object.values(objectValue)) {
+        const found = visit(child, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+
+      return undefined;
+    };
+
+    return visit(payload, 0);
+  }
+
+  private parseCursorActivity(filePath: string, sessionId: string, limit?: number, compact = true): ActivityRecord[] {
+    const records = this.scanCursor().filter((record) => record.id === sessionId && record.source_path === filePath);
+    const record = records[0];
+    if (!record) {
+      return [];
+    }
+
+    const events: ActivityRecord[] = [];
+    let syntheticId = 1;
+    const push = (payload: ActivityPayload, createdAt = record.updated_at) => {
+      events.push({ id: syntheticId, session_id: sessionId, created_at: createdAt, payload });
+      syntheticId += 1;
+    };
+
+    push({ type: "session_state_change", from: "unknown", to: record.status === "active" ? "working" : "completed" }, record.updated_at);
+    const lastUserMessage = this.pickString(record.metadata?.last_user_message);
+    const lastAgentMessage = this.pickString(record.metadata?.last_agent_message);
+    if (lastUserMessage) {
+      push({ type: "agent_thinking", summary: "User request: " + lastUserMessage }, record.updated_at);
+    }
+    if (lastAgentMessage) {
+      push({ type: "agent_thinking", summary: lastAgentMessage }, record.updated_at);
+    }
+
+    const pending = record.metadata?.pending_observed_review;
+    if (pending && typeof pending === "object") {
+      const action = this.pickString((pending as Record<string, unknown>).action);
+      const context = this.pickString((pending as Record<string, unknown>).context);
+      if (action && context) {
+        push({ type: "approval_requested", action, context }, this.pickString((pending as Record<string, unknown>).detected_at) ?? record.updated_at);
+      }
+    }
+
+    const collected = compact ? this.condenseImportedActivity(events) : events;
+    const ordered = collected.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return typeof limit === "number" ? ordered.slice(0, limit) : ordered;
+  }
+
+  private normalizeTimestamp(...values: unknown[]): string | undefined {
+    for (const value of values) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return new Date(value > 10_000_000_000 ? value : value * 1000).toISOString();
+      }
+
+      if (typeof value === "string" && value.trim()) {
+        const parsed = Date.parse(value);
+        if (!Number.isNaN(parsed)) {
+          return new Date(parsed).toISOString();
+        }
+      }
+    }
+
+    return undefined;
   }
 
   private scanCodex(): RecentWorkRecord[] {

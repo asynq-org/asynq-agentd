@@ -11,7 +11,7 @@ This document explains how the pieces fit together.
 - **Local-first.** Code, prompts, and session output never leave the machine.
 - **Dependency-light core.** The daemon should be runnable from a fresh checkout with minimal package installation.
 - **Stable contract.** External tools talk to a single HTTP / SSE / WebSocket surface, not to internal modules.
-- **Adapter isolation.** Each agent runtime (Claude Code, Codex, future ones) is plugged in behind a uniform interface, so the scheduler, storage, and API never need to know which agent is running.
+- **Adapter isolation.** Each agent runtime (Claude Code, Codex, Cursor, future ones) is plugged in behind a uniform interface, so the scheduler, storage, and API never need to know which agent is running.
 - **Operator-friendly.** The CLI and the contract are designed to make sessions, approvals, and recent work observable from the outside.
 
 ## High-level diagram
@@ -32,7 +32,7 @@ This document explains how the pieces fit together.
         │        │                 │               │     │
         │  ┌─────▼─────────────────▼───────────────▼───┐ │
         │  │              Adapter layer                │ │
-        │  │   Claude Code · Codex · (future agents)   │ │
+        │  │   Claude Code · Codex · Cursor · (future agents)   │ │
         │  └─────┬─────────────────────────────────┬───┘ │
         │        │                                 │     │
         │  ┌─────▼──────┐                  ┌───────▼───┐ │
@@ -70,7 +70,7 @@ This separation matters: anything the CLI can do, an external tool (or Buddy) ca
 
 The adapter interface isolates agent runtimes from the rest of the daemon. Each adapter is responsible for:
 
-- Spawning and supervising the underlying agent process (Claude Code, Codex CLI, etc.).
+- Spawning and supervising the underlying agent process (Claude Code, Codex CLI, Cursor CLI, etc.).
 - Translating daemon-level concepts (start a task, send input, request an approval, stop a session) into the agent's own protocol.
 - Streaming output and lifecycle events back to the daemon as structured events.
 - Reporting health and availability so the daemon can mark agents as up, degraded, or unavailable.

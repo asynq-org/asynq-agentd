@@ -580,8 +580,10 @@ function pickResumeSessionId(session: ReturnType<SessionService["getRecord"]>, t
   return pickString(
     session.metadata?.codex_session_id,
     session.metadata?.claude_session_id,
+    session.metadata?.cursor_session_id,
     session.metadata?.codex_resume_session_id,
     session.metadata?.claude_resume_session_id,
+    session.metadata?.cursor_resume_session_id,
     task?.context?.previous_session_id,
   );
 }
@@ -596,6 +598,21 @@ export function pickSourceCodexSessionId(
   return pickString(
     task?.context?.source_codex_session_id,
     sourceRecentWork?.source_type.startsWith("codex") ? sourceRecentWork.id : undefined,
+  );
+}
+
+export function pickSourceCursorSessionId(
+  task: ReturnType<TaskService["get"]>,
+  sourceRecentWork?: {
+    id: string;
+    source_type: string;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  return pickString(
+    task?.context?.source_cursor_session_id,
+    sourceRecentWork?.source_type === "cursor-session" ? sourceRecentWork.metadata?.cursor_conversation_id : undefined,
+    sourceRecentWork?.source_type === "cursor-session" ? sourceRecentWork.id : undefined,
   );
 }
 
@@ -1016,6 +1033,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
             source_recent_work_id: sourceRecentWork?.id ?? task?.context?.source_recent_work_id,
             source_recent_work_updated_at: sourceRecentWork?.updated_at ?? task?.context?.source_recent_work_updated_at,
             source_codex_session_id: pickSourceCodexSessionId(task, sourceRecentWork),
+            source_cursor_session_id: pickSourceCursorSessionId(task, sourceRecentWork),
             observed_takeover: task?.context?.observed_takeover,
             files_to_focus: task?.context?.files_to_focus,
             test_command: task?.context?.test_command,

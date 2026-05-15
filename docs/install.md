@@ -68,4 +68,5 @@ irm https://agentd.asynq.org/install.ps1 | iex
 - Buddy on iPhone requires an `https://...` daemon endpoint for reliable pairing and live updates. In Tailscale Admin Console, enable certs at `DNS → HTTPS Certificates → Enable HTTPS`, then let `asynq-agentctl pairing` auto-bootstrap TLS when possible.
 - Claude-backed tasks require a logged-in Claude Code CLI.
 - Codex-backed tasks require a working `codex` CLI.
+- Cursor-backed tasks require a working `cursor-agent` CLI.
 - Local voice dictation works best when `whisper-cli` and `ffmpeg` are installed. The installer now best-effort downloads the default Whisper model, and you can rerun setup later with `asynq-agentctl speech setup --install-model --restart`.

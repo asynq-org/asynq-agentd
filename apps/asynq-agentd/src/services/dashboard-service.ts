@@ -20,6 +20,7 @@ interface DashboardServiceOptions {
   codexObservedBridgeAvailable?: boolean;
   codexResumeContinuationAvailable?: boolean;
   claudeResumeContinuationAvailable?: boolean;
+  cursorResumeContinuationAvailable?: boolean;
 }
 
 const OBSERVED_WORKING_FRESHNESS_MS = 2 * 60 * 1000;
@@ -98,6 +99,7 @@ export class DashboardService {
   private readonly codexObservedBridgeAvailable: boolean;
   private readonly codexResumeContinuationAvailable: boolean;
   private readonly claudeResumeContinuationAvailable: boolean;
+  private readonly cursorResumeContinuationAvailable: boolean;
   private lastRecentWorkRefreshAt = 0;
 
   constructor(options: DashboardServiceOptions) {
@@ -111,6 +113,7 @@ export class DashboardService {
     this.codexObservedBridgeAvailable = options.codexObservedBridgeAvailable ?? false;
     this.codexResumeContinuationAvailable = options.codexResumeContinuationAvailable ?? false;
     this.claudeResumeContinuationAvailable = options.claudeResumeContinuationAvailable ?? false;
+    this.cursorResumeContinuationAvailable = options.cursorResumeContinuationAvailable ?? false;
   }
 
   getOverview(client?: { app_version?: string; min_supported_agentd_version?: string }) {
@@ -325,6 +328,7 @@ export class DashboardService {
         agent_type: session.agent_type,
         state: session.state,
         project_path: session.project_path,
+        branch: session.branch,
         summary: this.summaries.getSessionCardSummary(
           session,
           this.pickManagedSessionSummary(session.id, this.pickLatestAgentOutput(session.id)) ?? this.summarizeSession(session),
@@ -353,6 +357,7 @@ export class DashboardService {
           status: record.status,
           is_working: this.isObservedWorkCurrentlyWorking(record),
           project_path: record.project_path,
+          branch: this.recentWorkBranch(record),
           summary: summarized.summary,
           next_action: summarized.nextMove ?? "continue_recent_work",
           updated_at: record.updated_at,
@@ -397,6 +402,7 @@ export class DashboardService {
       title: summarized.title,
       project_path: record.project_path,
       project: this.projectName(record.project_path ?? "Linked project"),
+      branch: this.recentWorkBranch(record),
       source_type: record.source_type,
       status: record.status,
       is_working: this.isObservedWorkCurrentlyWorking(record),
@@ -592,7 +598,7 @@ export class DashboardService {
       return undefined;
     }
 
-    const agentType = record.source_type.includes("claude") ? "claude-code" : "codex";
+    const agentType = this.agentTypeForRecentWork(record);
     const commandSummary = pendingReview.cmd
       ? `Pending command: ${pendingReview.cmd}`
       : "Review the pending approval in the observed desktop session.";
@@ -601,8 +607,10 @@ export class DashboardService {
     const canResolveWithBridge = agentType === "codex" && this.codexObservedBridgeAvailable;
     const canResumeContinuation = agentType === "codex"
       ? this.codexResumeContinuationAvailable
-      : agentType === "claude-code" && this.claudeResumeContinuationAvailable;
-    const runtimeLabel = agentType === "claude-code" ? "Claude Code" : "Codex";
+      : agentType === "claude-code"
+        ? this.claudeResumeContinuationAvailable
+        : agentType === "cursor" && this.cursorResumeContinuationAvailable;
+    const runtimeLabel = this.runtimeLabel(agentType);
     const canResolveInBuddy = canResolveWithBridge || canResumeContinuation;
 
     return {
@@ -624,7 +632,7 @@ export class DashboardService {
       review: {
         machine: "Observed desktop session",
         agent: agentType,
-        branch: "Observed thread",
+        branch: this.recentWorkBranch(record) ?? "Observed thread",
         project: this.projectName(record.project_path ?? "Linked project"),
         review_hint: pendingReview.context,
         test_status: canResolveWithBridge
@@ -657,6 +665,30 @@ export class DashboardService {
         show_stats: hasStructuredDiff,
       },
     };
+  }
+
+  private agentTypeForRecentWork(record: RecentWorkRecord): "claude-code" | "codex" | "cursor" {
+    if (record.source_type.startsWith("codex")) {
+      return "codex";
+    }
+
+    if (record.source_type === "cursor-session") {
+      return "cursor";
+    }
+
+    return "claude-code";
+  }
+
+  private runtimeLabel(agentType: string): string {
+    if (agentType === "claude-code") {
+      return "Claude Code";
+    }
+
+    if (agentType === "cursor") {
+      return "Cursor";
+    }
+
+    return "Codex";
   }
 
   private buildApprovalReview(session: SessionRecord, task: TaskRecord | undefined, approval: ApprovalRecord) {
@@ -1033,6 +1065,15 @@ export class DashboardService {
       metadata.last_reasoning_summary,
     );
     return this.compactTitle(candidate);
+  }
+
+  private recentWorkBranch(record: RecentWorkRecord): string | undefined {
+    const metadata = record.metadata ?? {};
+    return this.pickString(
+      metadata.git_branch,
+      metadata.branch,
+      metadata.gitBranch,
+    );
   }
 
   private shouldIncludeRecentWork(record: RecentWorkRecord): boolean {

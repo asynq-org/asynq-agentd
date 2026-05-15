@@ -34,7 +34,7 @@ export type ResolveObservedApprovalInput = {
 };
 
 type ResolutionPayload = {
-  method: "codex_gui_bridge" | "codex_resume_continuation" | "claude_resume_continuation" | "in_place" | "managed_handoff" | "none";
+  method: "codex_gui_bridge" | "codex_resume_continuation" | "claude_resume_continuation" | "cursor_resume_continuation" | "in_place" | "managed_handoff" | "none";
   status: "verified" | "queued" | "failed";
   fallback_used: boolean;
   fallback_reason?: string;
@@ -80,6 +80,10 @@ function pickString(value: unknown): string | undefined {
 }
 
 function inferRuntimeFromRecentWork(record: RecentWorkRecord): AgentType {
+  if (record.source_type === "cursor-session") {
+    return "cursor";
+  }
+
   return record.source_type.includes("claude") ? "claude-code" : "codex";
 }
 
@@ -117,10 +121,12 @@ export class ObservedResolutionService {
   private readonly scheduler: SchedulerService;
   private readonly codexAdapter?: AgentAdapter;
   private readonly claudeAdapter?: AgentAdapter;
+  private readonly cursorAdapter?: AgentAdapter;
   private readonly codexBridge?: ObservedApprovalBridge;
   private readonly codexInPlaceBridgeAvailable: boolean;
   private readonly codexResumeContinuationAvailable: boolean;
   private readonly claudeResumeContinuationAvailable: boolean;
+  private readonly cursorResumeContinuationAvailable: boolean;
   private readonly verificationTimeoutMs: number;
   private readonly verificationPollIntervalMs: number;
 
@@ -130,10 +136,12 @@ export class ObservedResolutionService {
     scheduler: SchedulerService;
     codexAdapter?: AgentAdapter;
     claudeAdapter?: AgentAdapter;
+    cursorAdapter?: AgentAdapter;
     codexBridge?: ObservedApprovalBridge;
     codexInPlaceBridgeAvailable?: boolean;
     codexResumeContinuationAvailable?: boolean;
     claudeResumeContinuationAvailable?: boolean;
+    cursorResumeContinuationAvailable?: boolean;
     verificationTimeoutMs?: number;
     verificationPollIntervalMs?: number;
   }) {
@@ -142,10 +150,12 @@ export class ObservedResolutionService {
     this.scheduler = input.scheduler;
     this.codexAdapter = input.codexAdapter;
     this.claudeAdapter = input.claudeAdapter;
+    this.cursorAdapter = input.cursorAdapter;
     this.codexBridge = input.codexBridge;
     this.codexInPlaceBridgeAvailable = input.codexInPlaceBridgeAvailable ?? false;
     this.codexResumeContinuationAvailable = input.codexResumeContinuationAvailable ?? Boolean(input.codexAdapter?.appendToConversation);
     this.claudeResumeContinuationAvailable = input.claudeResumeContinuationAvailable ?? Boolean(input.claudeAdapter?.appendToConversation);
+    this.cursorResumeContinuationAvailable = input.cursorResumeContinuationAvailable ?? Boolean(input.cursorAdapter?.appendToConversation);
     this.verificationTimeoutMs = Math.max(50, input.verificationTimeoutMs ?? 8000);
     this.verificationPollIntervalMs = Math.max(10, input.verificationPollIntervalMs ?? 400);
   }
@@ -504,11 +514,23 @@ export class ObservedResolutionService {
       return this.claudeAdapter;
     }
 
+    if (runtime === "cursor" && this.cursorResumeContinuationAvailable && this.cursorAdapter?.appendToConversation) {
+      return this.cursorAdapter;
+    }
+
     return undefined;
   }
 
-  private resumeContinuationSource(runtime: AgentType): "codex_resume_continuation" | "claude_resume_continuation" {
-    return runtime === "claude-code" ? "claude_resume_continuation" : "codex_resume_continuation";
+  private resumeContinuationSource(runtime: AgentType): "codex_resume_continuation" | "claude_resume_continuation" | "cursor_resume_continuation" {
+    if (runtime === "claude-code") {
+      return "claude_resume_continuation";
+    }
+
+    if (runtime === "cursor") {
+      return "cursor_resume_continuation";
+    }
+
+    return "codex_resume_continuation";
   }
 
   private resumeContinuationMethod(runtime: AgentType): ResolutionPayload["method"] {
@@ -524,7 +546,7 @@ export class ObservedResolutionService {
     const action = pickString(approval?.action) ?? "Pending observed review";
     const context = pickString(approval?.context) ?? "No additional context was captured.";
     const operatorNote = pickString(note);
-    const runtimeLabel = runtime === "claude-code" ? "Claude Code" : "Codex";
+    const runtimeLabel = runtime === "claude-code" ? "Claude Code" : runtime === "cursor" ? "Cursor" : "Codex";
 
     return [
       `Buddy operator review decision for this ${runtimeLabel} thread.`,

@@ -353,6 +353,59 @@ test("observed resolution auto strategy uses Claude Code resume continuation whe
   assert.match(relayPrompt, /same-thread continuation/i);
 });
 
+test("observed resolution auto strategy uses Cursor resume continuation when available", async () => {
+  let relayCalls = 0;
+  let relayPrompt = "";
+
+  const service = new ObservedResolutionService({
+    dashboard: {
+      getApprovalDetail: () => ({
+        approval_id: "observed-review:cursor_recent_1",
+      }),
+    } as never,
+    recentWork: {
+      get: () => createObservedRecentWork("cursor_recent_1", true, "cursor-session"),
+      scan: () => {},
+      continueRecentWork: () => {
+        throw new Error("continueRecentWork should not be called for Cursor resume continuation");
+      },
+      markResumeContinuationResolved: () => undefined,
+      setContinuationApproval: () => {
+        throw new Error("setContinuationApproval should not be called without NEXT_APPROVAL_REQUIRED");
+      },
+    } as never,
+    scheduler: {
+      tick: async () => {},
+    } as never,
+    cursorAdapter: {
+      name: "cursor-cli",
+      runTask: async () => {},
+      appendToConversation: async (_conversationId: string, prompt: string) => {
+        relayCalls += 1;
+        relayPrompt = prompt;
+      },
+    },
+    verificationTimeoutMs: 60,
+    verificationPollIntervalMs: 10,
+  });
+
+  const result = await service.resolve({
+    approvalId: "observed-review:cursor_recent_1",
+    decision: "approved",
+    resolutionStrategy: "auto",
+    requireVerification: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution.method, "cursor_resume_continuation");
+  assert.equal(result.resolution.fallback_used, true);
+  assert.equal(result.resolution.fallback_reason, "live_bridge_unavailable_used_cursor_resume_continuation");
+  assert.equal(result.resolution.runtime, "cursor");
+  assert.equal(relayCalls, 1);
+  assert.match(relayPrompt, /Cursor thread/i);
+  assert.match(relayPrompt, /same-thread continuation/i);
+});
+
 test("observed resolution stores next continuation approval from Codex resume output", async () => {
   let capturedApproval: { action: string; context: string; cmd?: string; source?: string } | undefined;
 
