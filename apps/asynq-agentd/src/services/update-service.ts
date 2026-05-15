@@ -272,6 +272,23 @@ export class UpdateService {
     return { ...this.status };
   }
 
+  startInstallUpdate(): UpdateStatus {
+    if (this.status.status === "installing" || this.status.status === "restarting") {
+      return this.getStatus();
+    }
+
+    this.status = {
+      ...this.status,
+      status: "installing",
+      error: undefined,
+    };
+
+    queueMicrotask(() => {
+      void this.installUpdate();
+    });
+    return this.getStatus();
+  }
+
   getCompatibility(client?: {
     app_version?: string;
     min_supported_agentd_version?: string;

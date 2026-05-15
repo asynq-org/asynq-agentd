@@ -146,3 +146,52 @@ test("install update pins release ref and falls back to start when restart fails
     "asynq-agentctl start",
   ]);
 });
+
+test("start install update returns immediately while install continues", async () => {
+  const commands: string[] = [];
+  let updates: UpdateService | undefined;
+  let releaseInstall: (() => void) | undefined;
+  const installStarted = new Promise<void>((resolve) => {
+    updates = new UpdateService({
+      currentVersion: "0.4.0",
+      installCommand: "install-command",
+      restartCommand: "asynq-agentctl restart",
+      fetchImpl: async () => new Response(JSON.stringify({
+        tag_name: "v0.4.4",
+        html_url: "https://example.com/releases/v0.4.4",
+        body: "Patch release.",
+      }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+        },
+      }),
+      runCommand: async (command) => {
+        commands.push(command);
+        if (command.includes("install-command")) {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseInstall = release;
+          });
+        }
+      },
+    });
+
+    const status = updates.startInstallUpdate();
+    assert.equal(status.status, "installing");
+  });
+
+  await installStarted;
+  assert.equal(updates?.getStatus().status, "installing");
+  assert.deepEqual(commands, [
+    "ASYNQ_AGENTD_REF=v0.4.4 install-command",
+  ]);
+
+  releaseInstall?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(commands, [
+    "ASYNQ_AGENTD_REF=v0.4.4 install-command",
+    "asynq-agentctl restart",
+  ]);
+  assert.equal(updates?.getStatus().status, "restarting");
+});

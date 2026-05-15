@@ -147,6 +147,21 @@ export class DashboardService {
     };
   }
 
+  getStatus(client?: { app_version?: string; min_supported_agentd_version?: string }) {
+    const runtimes = this.runtimes.list();
+    return {
+      generated_at: nowIso(),
+      daemon: {
+        status: "ok",
+        version: this.updates.getStatus().current_version,
+      },
+      counts: this.storage.getStatusCounts(),
+      runtimes,
+      updates: this.updates.getStatus(),
+      compatibility: this.updates.getCompatibility(client),
+    };
+  }
+
   getManagedSessions() {
     const sessions = this.sessions.list();
     const visibleSessions = sessions

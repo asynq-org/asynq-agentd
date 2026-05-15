@@ -575,6 +575,19 @@ export class AsynqAgentdStorage {
     };
   }
 
+  getStatusCounts() {
+    return {
+      sessions_total: this.scalar("SELECT COUNT(*) FROM sessions"),
+      sessions_active: this.scalar("SELECT COUNT(*) FROM sessions WHERE state IN ('idle', 'working', 'waiting_approval')"),
+      sessions_working: this.scalar("SELECT COUNT(*) FROM sessions WHERE state = 'working'"),
+      sessions_waiting_approval: this.scalar("SELECT COUNT(*) FROM sessions WHERE state = 'waiting_approval'"),
+      tasks_total: this.scalar("SELECT COUNT(*) FROM tasks"),
+      tasks_running: this.scalar("SELECT COUNT(*) FROM tasks WHERE status = 'running'"),
+      tasks_paused: this.scalar("SELECT COUNT(*) FROM tasks WHERE status = 'paused'"),
+      approvals_pending: this.scalar("SELECT COUNT(*) FROM approvals WHERE status = 'pending'"),
+    };
+  }
+
   listRecentWork(): RecentWorkRecord[] {
     const rows = this.db.prepare(`
       SELECT * FROM recent_work

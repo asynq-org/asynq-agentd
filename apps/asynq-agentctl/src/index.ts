@@ -788,16 +788,23 @@ async function printPairing(args: string[]): Promise<void> {
 
 async function printStatus(): Promise<void> {
   try {
-    const [stats, sessions, approvals, overview] = await Promise.all([
-      request("/stats"),
-      request("/sessions"),
-      request("/approvals?status=pending"),
-      request("/dashboard/overview").catch(() => undefined),
-    ]);
-
-    const activeSessions = Array.isArray(sessions) ? sessions : [];
-    const pendingApprovals = Array.isArray(approvals) ? approvals : [];
-    const daemonVersion = typeof overview?.daemon?.version === "string" ? overview.daemon.version : undefined;
+    const status = await request("/status").catch(async () => {
+      const root = await request("/");
+      return {
+        daemon: {
+          status: root?.status,
+          version: root?.version,
+        },
+      };
+    });
+    const counts = typeof status?.counts === "object" && status.counts !== null
+      ? status.counts as Record<string, unknown>
+      : {};
+    const activeSessions = Number(counts.sessions_active ?? 0);
+    const totalSessions = Number(counts.sessions_total ?? 0);
+    const pendingApprovals = Number(counts.approvals_pending ?? 0);
+    const daemonVersion = typeof status?.daemon?.version === "string" ? status.daemon.version : undefined;
+    const agents = Array.isArray(status?.runtimes) ? status.runtimes : inspectAgents();
 
     print({
       endpoint: baseUrl,
@@ -807,13 +814,15 @@ async function printStatus(): Promise<void> {
         auth_token_present: Boolean(resolveToken()),
         version: daemonVersion ?? null,
       },
-      agents: inspectAgents(),
-      stats,
-      sessions: activeSessions,
-      approvals_pending: pendingApprovals.length,
-      message: activeSessions.length > 0
-        ? `Daemon is running with ${activeSessions.length} session${activeSessions.length === 1 ? "" : "s"}.`
-        : "Daemon is reachable and there are no active sessions yet.",
+      agents,
+      counts,
+      updates: status?.updates,
+      approvals_pending: pendingApprovals,
+      sessions_active: activeSessions,
+      sessions_total: totalSessions,
+      message: activeSessions > 0
+        ? `Daemon is reachable with ${activeSessions} active session${activeSessions === 1 ? "" : "s"}.`
+        : "Daemon is reachable.",
     });
   } catch (error) {
     print({

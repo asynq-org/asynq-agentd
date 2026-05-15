@@ -1021,6 +1021,14 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
         return;
       }
 
+      if (method === "GET" && path === "/status") {
+        send(200, services.dashboard.getStatus({
+          app_version: clientAppVersion,
+          min_supported_agentd_version: clientMinAgentdVersion,
+        }));
+        return;
+      }
+
       if (method === "GET" && path === "/sessions") {
         send(200, services.sessions.list());
         return;
@@ -1280,7 +1288,7 @@ export function createDaemonServer(services: AppServices, tls: TlsServerOptions)
       }
 
       if (method === "POST" && path === "/updates/install") {
-        const status = await services.updates.installUpdate();
+        const status = services.updates.startInstallUpdate();
         send(202, {
           ok: true,
           status,
