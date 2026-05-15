@@ -12,7 +12,12 @@ import {
 
 type UpdateFetch = typeof fetch;
 
-type RunCommand = (command: string) => Promise<void>;
+type RunCommandOptions = {
+  env?: Record<string, string>;
+  timeoutMs?: number;
+};
+
+type RunCommand = (command: string, options?: RunCommandOptions) => Promise<void>;
 
 export type UpdateStatus = {
   current_version: string;
@@ -46,20 +51,66 @@ type PullRequestResponse = {
   html_url?: string;
 };
 
-function defaultRunCommand(command: string): Promise<void> {
+function truncateCommandOutput(output: string, maxLength = 2000): string {
+  const normalized = output.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return normalized.slice(normalized.length - maxLength);
+}
+
+function defaultRunCommand(command: string, options?: RunCommandOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn("/bin/sh", ["-lc", command], {
-      stdio: "ignore",
+      env: {
+        ...process.env,
+        ...options?.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    const outputChunks: Buffer[] = [];
+    const timeoutMs = options?.timeoutMs ?? Number(process.env.ASYNQ_AGENTD_UPDATE_COMMAND_TIMEOUT_MS ?? 15 * 60 * 1000);
+    let didTimeout = false;
+    const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+        didTimeout = true;
+        child.kill("SIGTERM");
+      }, timeoutMs)
+      : undefined;
 
-    child.on("error", reject);
+    const captureOutput = (chunk: Buffer | string) => {
+      outputChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      let totalLength = outputChunks.reduce((total, item) => total + item.length, 0);
+      while (totalLength > 16_384 && outputChunks.length > 1) {
+        const removed = outputChunks.shift();
+        totalLength -= removed?.length ?? 0;
+      }
+    };
+
+    child.stdout?.on("data", captureOutput);
+    child.stderr?.on("data", captureOutput);
+
+    child.on("error", (error) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      reject(error);
+    });
     child.on("exit", (code) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      const output = truncateCommandOutput(Buffer.concat(outputChunks).toString("utf8"));
       if (code === 0) {
         resolve();
         return;
       }
 
-      reject(new Error(`Command failed with exit code ${code ?? "unknown"}`));
+      const reason = didTimeout
+        ? `Command timed out after ${timeoutMs}ms`
+        : `Command failed with exit code ${code ?? "unknown"}`;
+      reject(new Error(output ? `${reason}: ${output}` : reason));
     });
   });
 }
@@ -382,10 +433,7 @@ export class UpdateService {
 
     try {
       const releaseRef = buildReleaseRef(this.status.latest_version);
-      const installCommand = releaseRef
-        ? `ASYNQ_AGENTD_REF=${releaseRef} ${this.installCommand}`
-        : this.installCommand;
-      await this.runCommand(installCommand);
+      await this.runCommand(this.installCommand, releaseRef ? { env: { ASYNQ_AGENTD_REF: releaseRef } } : undefined);
       this.status = {
         ...this.status,
         status: "restarting",
